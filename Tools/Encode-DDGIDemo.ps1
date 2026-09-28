@@ -11,6 +11,11 @@ if (-not (Test-Path -LiteralPath $status) -or
     (Get-Content -LiteralPath $status -Raw).Trim() -ne 'completed: 360 frames') {
     throw 'Complete Dou DDGI > Record README Light Rotation in Unity before encoding.'
 }
+$captureInfo = Join-Path $output 'VideoCaptureInfo.txt'
+if (-not (Test-Path -LiteralPath $captureInfo) -or
+    -not (Get-Content -LiteralPath $captureInfo -Raw).Contains('Motion: camera-left -> camera-right -> camera-left')) {
+    throw 'Capture the current left-right-left demo before encoding; the previous center-start sweep is outdated.'
+}
 foreach ($mode in @('Composite', 'Indirect')) {
     for ($index = 0; $index -lt 360; $index++) {
         $path = Join-Path $frames ($mode + '/frame_{0:D4}.png' -f $index)

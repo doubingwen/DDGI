@@ -12,7 +12,7 @@ namespace Dou.DDGI.Editor
     [InitializeOnLoad]
     public static class DDGIReadmeVideoTool
     {
-        const string RequestPath = "Library/DDGI.ReadmeVideo.request";
+        const string RequestPath = "Library/DDGI.ReadmeVideo.v2.request";
         const string FrameDirectory = "Library/DDGI.VideoFrames";
         const int WarmupUpdates = 120;
         const int FrameCount = 360;
@@ -22,6 +22,9 @@ namespace Dou.DDGI.Editor
         static DDGICompositeDebugView[] originalModes;
         static Light mainLight;
         static Quaternion originalLightRotation;
+        static Quaternion centeredLightRotation;
+        static float centeringYaw;
+        static float startingYaw;
         static GameObject cameraObject;
         static Camera captureCamera;
         static RenderTexture target;
@@ -70,6 +73,20 @@ namespace Dou.DDGI.Editor
                 return;
             }
             originalLightRotation = mainLight.transform.rotation;
+            Vector3 lightHeading = Vector3.ProjectOnPlane(mainLight.transform.forward, Vector3.up).normalized;
+            Vector3 cameraHeading = Vector3.ProjectOnPlane(source.transform.forward, Vector3.up).normalized;
+            if (lightHeading.sqrMagnitude < 0.5f || cameraHeading.sqrMagnitude < 0.5f)
+            {
+                Debug.LogError("Use a nonvertical camera and directional light for the left-to-right demo.");
+                return;
+            }
+            Vector3 centralHeading = Vector3.Dot(lightHeading, cameraHeading) >= 0.0f
+                ? cameraHeading : -cameraHeading;
+            centeringYaw = Vector3.SignedAngle(lightHeading, centralHeading, Vector3.up);
+            centeredLightRotation = Quaternion.AngleAxis(centeringYaw, Vector3.up) * originalLightRotation;
+            Vector3 positiveOffsetLightDirection = -(Quaternion.AngleAxis(45.0f, Vector3.up) *
+                centeredLightRotation * Vector3.forward);
+            startingYaw = Vector3.Dot(positiveOffsetLightDirection, source.transform.right) <= 0.0f ? 45.0f : -45.0f;
             originalAutomatic = new bool[Volumes.Count];
             originalModes = new DDGICompositeDebugView[Volumes.Count];
             for (int i = 0; i < Volumes.Count; ++i)
@@ -81,6 +98,7 @@ namespace Dou.DDGI.Editor
             try
             {
                 File.WriteAllText("Library/DDGI.VideoCapture.status", "recording");
+                mainLight.transform.rotation = Quaternion.AngleAxis(startingYaw, Vector3.up) * centeredLightRotation;
                 Directory.CreateDirectory(Path.Combine(FrameDirectory, "Composite"));
                 Directory.CreateDirectory(Path.Combine(FrameDirectory, "Indirect"));
                 for (int i = 0; i < Volumes.Count; ++i)
@@ -158,8 +176,8 @@ namespace Dou.DDGI.Editor
                             RenderFrame(true, DDGICompositeDebugView.Composite);
                         return;
                     }
-                    float angle = 45.0f * Mathf.Sin(2.0f * Mathf.PI * frame / FrameCount);
-                    mainLight.transform.rotation = Quaternion.AngleAxis(angle, Vector3.up) * originalLightRotation;
+                    float angle = startingYaw * Mathf.Cos(2.0f * Mathf.PI * frame / (FrameCount - 1));
+                    mainLight.transform.rotation = Quaternion.AngleAxis(angle, Vector3.up) * centeredLightRotation;
                     RenderFrame(true, DDGICompositeDebugView.Composite);
                     SaveFrame("Composite");
                     RenderFrame(false, DDGICompositeDebugView.IndirectOnly);
@@ -233,8 +251,10 @@ namespace Dou.DDGI.Editor
                     "Source: Main Camera; fixed pose; 1280 x 720 per view\n" +
                     "Frames: 360; playback: 30 fps; duration: 12 seconds\n" +
                     "Main light: " + mainLight.name + "\n" +
-                    "Light rotation: world-Y offset = 45 * sin(2 * PI * frame / 360) degrees\n" +
-                    "Warmup: 120 DDGI updates from reset history\n" +
+                    $"Light centering: world-Y adjustment={centeringYaw:F3} degrees to align with the camera's horizontal sight line\n" +
+                    $"Light rotation: world-Y offset = {startingYaw:F1} * cos(2 * PI * frame / 359) degrees from the centered heading\n" +
+                    "Motion: camera-left -> camera-right -> camera-left; identical first/last light direction\n" +
+                    "Warmup: 120 DDGI updates at the left starting direction, from reset history\n" +
                     "One DDGI update per recorded frame, followed by IndirectOnly rendering from the same atlas\n" +
                     "Offline frame capture, not a real-time performance measurement\n" +
                     "Original light rotation, debug modes and automatic-update settings restored\n");

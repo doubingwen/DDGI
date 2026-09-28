@@ -2,8 +2,10 @@ Scene: Assets/Scenes/SampleScene.unity
 Source: Main Camera; fixed pose; 1280 x 720 per view
 Frames: 360; playback: 30 fps; duration: 12 seconds
 Main light: Directional Light
-Light rotation: world-Y offset = 45 * sin(2 * PI * frame / 360) degrees
-Warmup: 120 DDGI updates from reset history
+Light centering: world-Y adjustment=72.229 degrees to align with the camera's horizontal sight line
+Light rotation: world-Y offset = 45.0 * cos(2 * PI * frame / 359) degrees from the centered heading
+Motion: camera-left -> camera-right -> camera-left; identical first/last light direction
+Warmup: 120 DDGI updates at the left starting direction, from reset history
 One DDGI update per recorded frame, followed by IndirectOnly rendering from the same atlas
 Offline frame capture, not a real-time performance measurement
 Original light rotation, debug modes and automatic-update settings restored
