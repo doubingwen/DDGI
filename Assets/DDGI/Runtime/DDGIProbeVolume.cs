@@ -40,6 +40,7 @@ namespace Dou.DDGI
         static readonly int IndirectDiffuseIntensityId =
             Shader.PropertyToID("_DDGI_IndirectDiffuseIntensity");
         static readonly int CompositeDebugViewId = Shader.PropertyToID("_DDGI_CompositeDebugView");
+        static readonly int BoundaryBlendDistanceId = Shader.PropertyToID("_DDGI_BoundaryBlendDistance");
 
         [Header("Probe Grid")]
         [SerializeField] Vector3Int probeCounts = new Vector3Int(8, 8, 8);
@@ -98,6 +99,10 @@ namespace Dou.DDGI
         [SerializeField, Min(0.0f)] float indirectDiffuseIntensity = 1.0f;
         [SerializeField] DDGICompositeDebugView compositeDebugView;
 
+        [Header("Multi-Volume Blending")]
+        [Tooltip("World-space width of the linear fade inside each volume boundary.")]
+        [SerializeField, Min(0.001f)] float boundaryBlendDistance = 1.0f;
+
         readonly List<DDGIProbe> probes = new List<DDGIProbe>();
         DDGIRayGBuffer rayGBuffer;
         ComputeBuffer probePositionBuffer;
@@ -155,6 +160,10 @@ namespace Dou.DDGI
             distanceMomentsAtlas != null && distanceMomentsAtlas.IsCreated();
         public bool CaptureVolumeEveryFrame => captureVolumeEveryFrame;
         public bool CaptureVolumeInEditMode => captureVolumeInEditMode;
+        public DDGICompositeDebugView CompositeDebugView => compositeDebugView;
+        public float WorldProbeDensity => 1.0f / Mathf.Max(
+            Mathf.Abs(transform.localToWorldMatrix.determinant) *
+            probeSpacing.x * probeSpacing.y * probeSpacing.z, 1e-8f);
         public int RecordedUpdateCount { get; private set; }
         public int AccumulatedFrameCount { get; private set; }
         public bool HasPendingShadowedEvaluation => pendingShadowedEvaluation;
@@ -209,6 +218,7 @@ namespace Dou.DDGI
             minimumProbeWeight = Mathf.Max(0.000001f, minimumProbeWeight);
             minimumDistanceVariance = Mathf.Max(0.000001f, minimumDistanceVariance);
             indirectDiffuseIntensity = Mathf.Max(0.0f, indirectDiffuseIntensity);
+            boundaryBlendDistance = Mathf.Max(0.001f, boundaryBlendDistance);
 
             RefreshProbeCache();
             UpdateExistingProbeTransforms();
@@ -509,6 +519,7 @@ namespace Dou.DDGI
             commandBuffer.SetGlobalFloat(MinimumDistanceVarianceId, minimumDistanceVariance);
             commandBuffer.SetGlobalFloat(IndirectDiffuseIntensityId, indirectDiffuseIntensity);
             commandBuffer.SetGlobalInt(CompositeDebugViewId, (int)compositeDebugView);
+            commandBuffer.SetGlobalFloat(BoundaryBlendDistanceId, boundaryBlendDistance);
             rayGBuffer.BindGlobals(commandBuffer);
             if (RadianceTexture != null && RadianceTexture.IsCreated())
                 commandBuffer.SetGlobalTexture(RayRadianceTextureId, RadianceTexture);

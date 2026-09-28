@@ -34,6 +34,7 @@ float _DDGI_SurfaceViewBias;
 float _DDGI_MinimumProbeWeight;
 float _DDGI_MinimumDistanceVariance;
 float _DDGI_IndirectDiffuseIntensity;
+float _DDGI_BoundaryBlendDistance;
 int _DDGI_CompositeDebugView;
 
 static const int3 DDGI_PROBE_OFFSETS[8] =
@@ -163,12 +164,34 @@ bool DDGIIsInsideVolume(float3 continuousProbeCoordinate, int3 probeCounts)
         all(continuousProbeCoordinate <= (float3)(probeCounts - 1));
 }
 
+float DDGIGetVolumeBlendWeight(float3 worldPosition)
+{
+    float3 localPosition = mul(_DDGI_WorldToVolume, float4(worldPosition, 1.0)).xyz;
+    float3 minimum = _DDGI_MinimumLocalProbePosition.xyz;
+    float3 maximum = minimum + (_DDGI_ProbeCounts.xyz - 1.0) * _DDGI_ProbeSpacing.xyz;
+    float3 localEdgeDistance = min(localPosition - minimum, maximum - localPosition);
+    // Rows of the inverse transform convert local plane distances to world distances,
+    // including nonuniform scale and parent-induced shear.
+    float3 inversePlaneScale = float3(
+        length(_DDGI_WorldToVolume[0].xyz),
+        length(_DDGI_WorldToVolume[1].xyz),
+        length(_DDGI_WorldToVolume[2].xyz));
+    float3 worldEdgeDistance = localEdgeDistance / max(inversePlaneScale, 1e-6);
+    float distanceToEdge = min(worldEdgeDistance.x, min(worldEdgeDistance.y, worldEdgeDistance.z));
+    return saturate(distanceToEdge / max(_DDGI_BoundaryBlendDistance, 1e-6));
+}
+
 float3 DDGISampleIrradiance(
     float3 worldPosition,
     float3 surfaceNormal,
     float3 viewDirection)
 {
     int3 probeCounts = (int3)_DDGI_ProbeCounts.xyz;
+    float3 surfaceLocalPosition = mul(_DDGI_WorldToVolume, float4(worldPosition, 1.0)).xyz;
+    float3 surfaceCoordinate =
+        (surfaceLocalPosition - _DDGI_MinimumLocalProbePosition.xyz) / _DDGI_ProbeSpacing.xyz;
+    if (!DDGIIsInsideVolume(surfaceCoordinate, probeCounts))
+        return 0.0;
     float3 normalWS = normalize(surfaceNormal);
     float3 visibilityPosition = worldPosition +
         normalWS * _DDGI_SurfaceNormalBias +
@@ -180,8 +203,8 @@ float3 DDGISampleIrradiance(
         (localPosition - _DDGI_MinimumLocalProbePosition.xyz) /
         _DDGI_ProbeSpacing.xyz;
 
-    if (!DDGIIsInsideVolume(continuousCoordinate, probeCounts))
-        return 0.0;
+    // Bias affects visibility but must not abruptly exclude points near a volume edge.
+    continuousCoordinate = clamp(continuousCoordinate, 0.0, (float3)(probeCounts - 1));
 
     int3 baseCoordinate = min(
         (int3)floor(continuousCoordinate),

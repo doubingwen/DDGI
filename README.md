@@ -15,6 +15,7 @@
 - 使用三线性插值、方向权重及切比雪夫可见性权重混合周围 8 个 Probe，并加入 Surface Bias 减少自遮挡。
 - 时间累积：Irradiance 使用 gamma 空间混合，距离与距离平方使用相同权重线性混合。
 - 运行时逐帧更新、编辑器 Scene 视图预览，以及纹理和间接光调试视图。
+- 多 Volume 合成：按世界空间 Probe 密度排序，通过边界线性淡出和剩余覆盖率混合不同分辨率的 Volume。
 
 ## 整体流程
 
@@ -85,11 +86,24 @@ new = [(1 - alpha) * current^(1 / gamma) + alpha * previous^(1 / gamma)]^gamma
 | --- | --- | --- |
 | ![单 Probe Albedo 捕获](Assets/DDGI/Captures/SingleProbe_Albedo.png) | ![单 Probe Normal 捕获](Assets/DDGI/Captures/SingleProbe_Normal.png) | ![单 Probe Position 捕获](Assets/DDGI/Captures/SingleProbe_Position.png) |
 
+## 多 Volume
+
+可以同时创建多个 `DDGI Probe Volume`。例如，大范围 Volume 使用间距 2 的 Probe，局部区域使用间距 1 的 Probe；各自开启逐帧捕获，并生成自己的网格与 Atlas。
+
+- CPU 按 `1 / (世界变换体积缩放 x ProbeSpacing.x x ProbeSpacing.y x ProbeSpacing.z)` 从高密度到低密度排序，包含 Transform 缩放的影响。
+- `Boundary Blend Distance` 控制 Volume 内侧的世界空间线性淡出宽度，默认 1。局部 Volume 的淡出带应被低密度 Volume 覆盖，宽度应小于最短边长度的一半。
+- 高密度 Volume 优先，后续 Volume 的有效权重为 `remainingCoverage x boundaryWeight`，不是直接把多份 GI 相加。
+- 最外层 Volume 在边界淡出到零；归一化后仍保留覆盖率，避免淡出被抵消。
+- 各个 Volume 独立进行历史累积与多次反弹反馈；当前没有跨 Volume 查询命中点的上一帧间接光。统一调试模式由密度最高、已有有效数据的 Volume 决定。
+- Inspector 的 `Rendered Volume Count` 可以确认参与合成的数量。Volume 每个轴至少设置 2 个 Probe，才能形成有体积的三维采样区域。
+
+CPU 参考混合测试可执行 `pwsh -File Tools/Test-DDGIVolumeBlending.ps1`；该测试验证权重和边界公式，不代替 GPU 画面验证。
+
 ## 当前限制
 
 - ShadowMap 阴影目前仅接入主方向光；点光源和聚光灯虽然参与 Radiance 计算，但尚未接入对应阴影。
 - 主光 ShadowMap 由相机生成，覆盖范围受相机级联影响；超出有效级联的 Probe 命中点不会获得主光直接贡献。
 - 每次更新扫描 MeshRenderer 并重建加速结构，尚未实现增量更新、Probe 更新预算和 SkinnedMeshRenderer 捕获。
-- 尚未实现 Probe 重定位、分类、滚动 Volume 和多 Volume 融合；当前合成使用活动的主 Volume。
+- 尚未实现 Probe 重定位、分类和滚动 Volume。多 Volume 逐个绘制全屏合成，并独立重建加速结构，更新与合成开销随 Volume 数量增加，尚未加入裁剪和共享加速结构。
 - 实验性 Blinn-Phong 光照和辐照度近似尚未完成统一的物理能量标定，也没有完整的突变历史拒绝策略。
 - 64 根射线的稳定性、漏光、动态拖尾及实际 GPU 性能仍需结合具体场景验证。

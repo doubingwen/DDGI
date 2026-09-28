@@ -1,4 +1,6 @@
 using UnityEngine;
+using System.Collections.Generic;
+using UnityEngine.Experimental.Rendering;
 using UnityEngine.Rendering;
 using UnityEngine.Rendering.Universal;
 
@@ -8,6 +10,7 @@ namespace Dou.DDGI
     {
         public static string RuntimeStatus { get; private set; } = "Feature has not been created.";
         public static string LastRenderedCamera { get; private set; }
+        public static int RenderedVolumeCount { get; private set; }
 
         static void SetRuntimeStatus(string status)
         {
@@ -24,8 +27,13 @@ namespace Dou.DDGI
                 new ProfilingSampler("Dou DDGI: Composite Indirect Diffuse");
 
             readonly Material compositeMaterial;
+            readonly List<DDGIProbeVolume> volumes = new List<DDGIProbeVolume>();
+            readonly List<DDGIProbeVolume> readyVolumes = new List<DDGIProbeVolume>();
+            static readonly int AccumulatedIndirectId = Shader.PropertyToID("_DDGI_AccumulatedIndirectTexture");
+            static readonly int DebugViewId = Shader.PropertyToID("_DDGI_CompositeDebugView");
             RTHandle cameraColor;
             RTHandle temporaryColor;
+            RTHandle accumulatedIndirect;
 
             public DDGICompositePass(Material material)
             {
@@ -51,13 +59,19 @@ namespace Dou.DDGI
                     FilterMode.Bilinear,
                     TextureWrapMode.Clamp,
                     name: "_DDGICompositeColor");
+                descriptor.graphicsFormat = GraphicsFormat.R16G16B16A16_SFloat;
+                descriptor.msaaSamples = 1;
+                RenderingUtils.ReAllocateHandleIfNeeded(
+                    ref accumulatedIndirect, descriptor, FilterMode.Bilinear,
+                    TextureWrapMode.Clamp, name: "_DDGIAccumulatedIndirect");
             }
 
             public override void Execute(
                 ScriptableRenderContext context,
                 ref RenderingData renderingData)
             {
-                DDGIProbeVolume volume = DDGIProbeVolumeRegistry.PrimaryVolume;
+                DDGIProbeVolumeRegistry.GetActiveVolumesByDensity(volumes);
+                RenderedVolumeCount = 0;
                 if (compositeMaterial == null)
                 {
                     SetRuntimeStatus("Skipped because the composite material is unavailable.");
@@ -68,13 +82,14 @@ namespace Dou.DDGI
                     SetRuntimeStatus("Skipped because the camera color target is unavailable.");
                     return;
                 }
-                if (volume == null)
+                if (volumes.Count == 0)
                 {
                     SetRuntimeStatus("Skipped because no active DDGI Probe Volume is registered.");
                     return;
                 }
 
                 CommandBuffer commandBuffer = CommandBufferPool.Get();
+                string updateIssue = null;
                 try
                 {
                     using (new ProfilingScope(commandBuffer, ProfilingSampler))
@@ -83,80 +98,48 @@ namespace Dou.DDGI
                             CameraRenderType.Base &&
                             (renderingData.cameraData.cameraType == CameraType.Game ||
                              renderingData.cameraData.cameraType == CameraType.SceneView);
-                        bool captureAutomatically = volume.CaptureVolumeEveryFrame &&
-                            (Application.isPlaying
-                                ? renderingData.cameraData.cameraType == CameraType.Game
-                                : volume.CaptureVolumeInEditMode &&
-                                  renderingData.cameraData.cameraType == CameraType.SceneView);
-                        bool needsInitialCapture = Application.isPlaying &&
-                            renderingData.cameraData.cameraType == CameraType.Game &&
-                            !volume.HasBlendedProbeData;
-                        if (canUpdateVolume &&
-                            (volume.HasPendingShadowedEvaluation || captureAutomatically || needsInitialCapture))
-                        {
-                            int mainLightIndex = renderingData.lightData.mainLightIndex;
-                            Light mainLight = mainLightIndex >= 0
-                                ? renderingData.lightData.visibleLights[mainLightIndex].light
-                                : null;
-                            bool hasShadowedMainLight = renderingData.shadowData.supportsMainLightShadows &&
-                                               mainLight != null &&
-                                               mainLight.type == LightType.Directional &&
-                                               mainLight.shadows != LightShadows.None &&
-                                               mainLight.shadowStrength > 0.0f;
-                            int cascadeCount = hasShadowedMainLight
-                                ? renderingData.shadowData.mainLightShadowCascadesCount
-                                : 0;
-                            if (cascadeCount == 0 &&
-                                ((mainLight != null && mainLight.type == LightType.Directional) ||
-                                 (mainLight == null && HasEnabledDirectionalLight())))
-                            {
-                                SetRuntimeStatus("Skipped DDGI update: enable main light shadows and ensure a camera shadow map is available.");
-                                return;
-                            }
+                        int mainLightIndex = renderingData.lightData.mainLightIndex;
+                        Light mainLight = mainLightIndex >= 0
+                            ? renderingData.lightData.visibleLights[mainLightIndex].light
+                            : null;
+                        bool hasShadowedMainLight = renderingData.shadowData.supportsMainLightShadows &&
+                            mainLight != null && mainLight.type == LightType.Directional &&
+                            mainLight.shadows != LightShadows.None && mainLight.shadowStrength > 0.0f;
+                        int cascadeCount = hasShadowedMainLight
+                            ? renderingData.shadowData.mainLightShadowCascadesCount : 0;
+                        bool missingMainLightShadows = cascadeCount == 0 &&
+                            ((mainLight != null && mainLight.type == LightType.Directional) ||
+                             (mainLight == null && HasEnabledDirectionalLight()));
 
-                            if (captureAutomatically || needsInitialCapture)
-                            {
-                                if (!SystemInfo.supportsRayTracingShaders)
-                                {
-                                    SetRuntimeStatus("Skipped DDGI capture: ray tracing shaders are unsupported. Use a DX12 ray tracing device.");
-                                    return;
-                                }
-                                if (!volume.HasCaptureShaders || !volume.HasRadianceShader ||
-                                    !volume.HasProbeBlendShader)
-                                {
-                                    SetRuntimeStatus("Skipped DDGI capture: assign the ray tracing, surface, radiance and ProbeBlend shaders.");
-                                    return;
-                                }
-                                volume.RecordRealtimeCaptureAndBlend(
-                                    commandBuffer,
-                                    mainLight,
-                                    cascadeCount);
-                            }
-                            else
-                            {
-                                volume.RecordPendingShadowedRadianceAndBlend(
-                                    commandBuffer,
-                                    mainLight,
-                                    cascadeCount);
-                            }
+                        readyVolumes.Clear();
+                        foreach (DDGIProbeVolume volume in volumes)
+                        {
+                            if (canUpdateVolume)
+                                updateIssue = TryUpdateVolume(commandBuffer, volume,
+                                    renderingData.cameraData.cameraType, mainLight, cascadeCount,
+                                    missingMainLightShadows) ?? updateIssue;
+                            if (volume.HasBlendedProbeData)
+                                readyVolumes.Add(volume);
                         }
 
-                        if (!volume.HasBlendedProbeData)
+                        if (readyVolumes.Count > 0)
                         {
-                            SetRuntimeStatus(volume.CaptureVolumeEveryFrame
-                                ? "Skipped because the active volume has no blended probe data."
-                                : "No blended probe data. Automatic capture is off; Play initializes on the first game camera, or capture manually in the editor.");
-                            return;
+                            int debugView = (int)readyVolumes[0].CompositeDebugView;
+                            CoreUtils.SetRenderTarget(commandBuffer, accumulatedIndirect, ClearFlag.Color, Color.clear);
+                            foreach (DDGIProbeVolume volume in readyVolumes)
+                            {
+                                volume.BindShaderGlobals(commandBuffer);
+                                // All volumes use the densest ready volume's debug mode.
+                                commandBuffer.SetGlobalInt(DebugViewId, debugView);
+                                Blitter.BlitCameraTexture(commandBuffer, cameraColor, accumulatedIndirect,
+                                    RenderBufferLoadAction.Load, RenderBufferStoreAction.Store,
+                                    compositeMaterial, 0);
+                            }
+                            commandBuffer.SetGlobalTexture(AccumulatedIndirectId, accumulatedIndirect.nameID);
+                            Blitter.BlitCameraTexture(commandBuffer, cameraColor, temporaryColor, compositeMaterial, 1);
+                            Blitter.BlitCameraTexture(commandBuffer, temporaryColor, cameraColor);
+                            RenderedVolumeCount = readyVolumes.Count;
                         }
-
-                        volume.BindShaderGlobals(commandBuffer);
-                        Blitter.BlitCameraTexture(
-                            commandBuffer,
-                            cameraColor,
-                            temporaryColor,
-                            compositeMaterial,
-                            0);
-                        Blitter.BlitCameraTexture(commandBuffer, temporaryColor, cameraColor);
                     }
 
                     context.ExecuteCommandBuffer(commandBuffer);
@@ -166,7 +149,34 @@ namespace Dou.DDGI
                     CommandBufferPool.Release(commandBuffer);
                 }
                 LastRenderedCamera = renderingData.cameraData.camera.name;
-                SetRuntimeStatus("Rendered DDGI indirect diffuse.");
+                SetRuntimeStatus(RenderedVolumeCount > 0
+                    ? $"Rendered {RenderedVolumeCount} DDGI volumes." +
+                        (updateIssue == null ? "" : $" Update skipped: {updateIssue}")
+                    : updateIssue ?? "No blended probe data. Enable automatic capture or capture manually in the editor.");
+            }
+
+            static string TryUpdateVolume(CommandBuffer commandBuffer, DDGIProbeVolume volume,
+                CameraType cameraType, Light mainLight, int cascadeCount, bool missingMainLightShadows)
+            {
+                bool automatic = volume.CaptureVolumeEveryFrame &&
+                    (Application.isPlaying ? cameraType == CameraType.Game
+                        : volume.CaptureVolumeInEditMode && cameraType == CameraType.SceneView);
+                bool initial = Application.isPlaying && cameraType == CameraType.Game && !volume.HasBlendedProbeData;
+                if (!automatic && !initial && !volume.HasPendingShadowedEvaluation)
+                    return null;
+                if (missingMainLightShadows)
+                    return $"{volume.name}: main light shadow map is unavailable.";
+                if (!volume.HasCaptureShaders || !volume.HasRadianceShader || !volume.HasProbeBlendShader)
+                    return $"{volume.name}: capture, radiance or ProbeBlend shader is missing.";
+                if (automatic || initial)
+                {
+                    if (!SystemInfo.supportsRayTracingShaders)
+                        return $"{volume.name}: ray tracing shaders are unsupported.";
+                    volume.RecordRealtimeCaptureAndBlend(commandBuffer, mainLight, cascadeCount);
+                }
+                else
+                    volume.RecordPendingShadowedRadianceAndBlend(commandBuffer, mainLight, cascadeCount);
+                return null;
             }
 
             public override void OnCameraCleanup(CommandBuffer commandBuffer)
@@ -178,6 +188,8 @@ namespace Dou.DDGI
             {
                 temporaryColor?.Release();
                 temporaryColor = null;
+                accumulatedIndirect?.Release();
+                accumulatedIndirect = null;
                 cameraColor = null;
             }
         }

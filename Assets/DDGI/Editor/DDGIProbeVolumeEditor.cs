@@ -1,4 +1,5 @@
 using UnityEditor;
+using System.Collections.Generic;
 using UnityEngine;
 using UnityEngine.Rendering;
 using UnityEngine.Rendering.Universal;
@@ -10,6 +11,7 @@ namespace Dou.DDGI.Editor
     {
         static bool rendererInvalidatedThisDomain;
         static double nextPreviewRefreshTime;
+        static readonly List<DDGIProbeVolume> PreviewVolumes = new List<DDGIProbeVolume>();
 
         const string RayTracingShaderPath = "Assets/DDGI/Shaders/TraceProbeGBuffer.raytrace";
         const string SurfaceShaderName = "DouDDGI/RayTracingSurface";
@@ -55,15 +57,17 @@ namespace Dou.DDGI.Editor
                 SceneView.sceneViews.Count == 0 || !SystemInfo.supportsRayTracingShaders)
                 return;
 
-            DDGIProbeVolume volume = DDGIProbeVolumeRegistry.PrimaryVolume;
-            if (volume == null || !volume.CaptureVolumeEveryFrame ||
-                !volume.CaptureVolumeInEditMode || !volume.HasCaptureShaders ||
-                !volume.HasRadianceShader || !volume.HasProbeBlendShader)
-                return;
-
-            // Repaint drives the camera shadow pass even when the editor scene is idle.
-            nextPreviewRefreshTime = EditorApplication.timeSinceStartup + 0.1;
-            SceneView.RepaintAll();
+            DDGIProbeVolumeRegistry.GetActiveVolumesByDensity(PreviewVolumes);
+            foreach (DDGIProbeVolume volume in PreviewVolumes)
+            {
+                if (!volume.CaptureVolumeEveryFrame || !volume.CaptureVolumeInEditMode ||
+                    !volume.HasCaptureShaders || !volume.HasRadianceShader || !volume.HasProbeBlendShader)
+                    continue;
+                // Repaint drives all volumes' camera shadow passes while the editor is idle.
+                nextPreviewRefreshTime = EditorApplication.timeSinceStartup + 0.1;
+                SceneView.RepaintAll();
+                break;
+            }
         }
 
         public override bool RequiresConstantRepaint()
@@ -93,6 +97,7 @@ namespace Dou.DDGI.Editor
             EditorGUILayout.Space();
             EditorGUILayout.LabelField("Generated Layout", EditorStyles.boldLabel);
             EditorGUILayout.LabelField("Probe Count", volume.ProbeCount.ToString());
+            EditorGUILayout.LabelField("World Probe Density", volume.WorldProbeDensity.ToString("G5"));
             EditorGUILayout.LabelField("Atlas Tiles", volume.AtlasTileCounts.ToString());
             EditorGUILayout.LabelField(
                 "Irradiance Atlas",
@@ -111,6 +116,7 @@ namespace Dou.DDGI.Editor
                 EditorStyles.wordWrappedLabel);
             EditorGUILayout.LabelField("Recorded GI Updates", volume.RecordedUpdateCount.ToString());
             EditorGUILayout.LabelField("Accumulated Frames", volume.AccumulatedFrameCount.ToString());
+            EditorGUILayout.LabelField("Rendered Volume Count", DDGICompositeFeature.RenderedVolumeCount.ToString());
             if (!string.IsNullOrEmpty(DDGICompositeFeature.LastRenderedCamera))
                 EditorGUILayout.LabelField("Last Rendered Camera", DDGICompositeFeature.LastRenderedCamera);
             if (!volume.CaptureVolumeEveryFrame)
