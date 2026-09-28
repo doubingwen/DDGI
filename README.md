@@ -4,6 +4,64 @@
 
 本项目用于学习和验证 DDGI 的核心流程，不依赖 NVIDIA RTXGI SDK。仓库保留了早期的 SH Probe GI 方案，DDGI 使用独立的代码、Shader 和 Renderer Feature。
 
+## 场景效果
+
+以下图片由当前 `SampleScene` 的 Main Camera 自动渲染导出，分辨率为 `1600 x 900`。两张对比图使用同一机位、光源和同一份已累积的 Volume 数据，只切换最终 DDGI 合成强度，不修改直接光照。
+
+| 关闭 DDGI 间接光 | 开启 DDGI 间接光 |
+| --- | --- |
+| ![Sponza：关闭 DDGI](pictures/ddgi/Scene_WithoutDDGI.png) | ![Sponza：开启 DDGI](pictures/ddgi/Scene_WithDDGI.png) |
+
+开启后，原本处于直接光阴影中的墙面、地面和布帘获得间接漫反射贡献。这里“关闭 DDGI”仅表示将两个 Volume 的 `Indirect Diffuse Intensity` 设为 0，不代表禁用了 URP 的所有环境光或其他光照项；开启时两个 Volume 的强度均为 1。
+
+**仅 DDGI 间接漫反射：**
+
+![Sponza：仅 DDGI 间接光](pictures/ddgi/Scene_IndirectOnly.png)
+
+该视图使用 `IndirectOnly` 调试模式，只展示 DDGI 的间接漫反射贡献；天空等没有有效表面深度的像素仍沿用原始背景。图片是当前实验实现的实际输出，不作为物理正确性、漏光完全消除或性能提升的证明。
+
+## GPU Buffer 可视化
+
+下面的纹理由 GPU RenderTexture 直接读取，选取高密度的 `DDGI Volume - Interior`：1008 个 Probe，每个 Probe 64 根射线，原始 Ray G-Buffer 分辨率为 `64 x 1008`。为便于横向查看，Ray Buffer 预览转置为 **横轴 Probe、纵轴射线**，并以最近邻放大 2 倍；这只改变展示方式，没有改变运行时纹理布局。
+
+### Ray G-Buffer
+
+**Albedo：命中表面的漫反射颜色。** 从线性颜色转换到 sRGB 用于 PNG 展示，未命中部分为黑色。
+
+![Ray G-Buffer Albedo](pictures/ddgi/Buffer_Albedo.png)
+
+**Normal：命中点的世界空间法线。** 将分量从 `[-1, 1]` 映射到 `[0, 1]`；未命中部分为黑色。
+
+![Ray G-Buffer 世界空间法线](pictures/ddgi/Buffer_Normal.png)
+
+**Position：命中点的世界空间坐标。** RGB 分别表示 XYZ，在本次命中坐标的包围范围内逐轴归一化；不能将图中的颜色当作原始坐标值。
+
+![Ray G-Buffer 世界空间位置](pictures/ddgi/Buffer_Position.png)
+
+### Radiance 与主光可见性
+
+**Ray Radiance：命中点返回的光照结果。** 包含直接光照与上一帧 Volume 的间接漫反射反馈；预览使用 `c / (1 + c)` 色调映射，再转为 sRGB，不是线性 HDR 原始数值。
+
+![Ray Radiance](pictures/ddgi/Buffer_Radiance.png)
+
+**Main Light Visibility：主方向光的 ShadowMap 可见性。** 白色表示可见，黑色表示没有主光贡献，中间灰度表示部分可见；黑色也可能来自未命中、无效阴影级联或未更新的 Probe，不能全部解释为几何遮挡。
+
+![主方向光 ShadowMap 可见性](pictures/ddgi/Buffer_MainLightVisibility.png)
+
+### 八面体 Probe Atlas
+
+| Irradiance Atlas | Distance Moments Atlas：平均距离预览 |
+| --- | --- |
+| ![八面体 Irradiance Atlas](pictures/ddgi/Atlas_Irradiance.png) | ![八面体距离 Atlas](pictures/ddgi/Atlas_Distance.png) |
+
+- Irradiance 原始 Atlas 为 `256 x 256`，每个 Probe 使用 `6 x 6` 内部纹素与一圈边界，完整 tile 为 `8 x 8`；预览采用与 Radiance 相同的色调映射。
+- 距离矩原始 Atlas 为 `512 x 512`，RG 分别存储平均距离和距离平方的平均值，每个 Probe 的完整 tile 为 `16 x 16`。上图只展示 R 通道，除以最大射线距离后转为灰度，**不是距离平方或方差图**。
+- Atlas 预览采用最近邻放大 3 倍；完整 Atlas 还可能包含未使用的 tile，黑色区域不能仅凭图片判断为 `Off`。
+
+本次导出记录了 5999 次时间累积更新，Interior Ray G-Buffer 中 58857 / 64512 个纹素有有效命中。具体机位、尺寸和强度见 [CaptureInfo.txt](pictures/ddgi/CaptureInfo.txt)。这些是一次捕获的记录，不是每帧的命中率或性能统计。
+
+可通过 Unity 菜单 `Dou DDGI > Export README Screenshots` 重新导出当前机位的图片。工具优先使用 Main Camera，自动冻结 Volume 更新进行三种模式对比，结束后恢复原有强度、调试模式和更新开关，不保存临时场景参数；建议先让 Volume 完成时间累积。
+
 ## 已实现
 
 - 规则 Probe Volume，默认为 `8 x 8 x 8`，每个 Probe 默认采样 64 根射线。

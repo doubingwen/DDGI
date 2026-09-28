@@ -1,0 +1,15 @@
+Scene: Assets/Scenes/SampleScene.unity
+Camera: Main Camera
+Camera position: (-2.78, 2.86, -0.34)
+Camera rotation: (358.26, 94.61, 359.72)
+Buffer volume: DDGI Volume - Interior
+Native Ray G-Buffer: 64 x 1008
+Ray hits: 58857/64512
+Accumulated frames: 5999
+Position normalization bounds: (-17.57, -2.15, -11.61) .. (18.71, 13.95, 10.65)
+Irradiance atlas: (256, 256)
+Distance atlas: (512, 512)
+Rendered volumes: 2
+Runtime status: Rendered 2 DDGI volumes.
+DDGI Volume - Interior: indirect intensity=1, probes=1008
+DDGI Volume - Building: indirect intensity=1, probes=288
