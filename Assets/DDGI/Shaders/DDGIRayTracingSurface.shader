@@ -63,6 +63,7 @@ Shader "DouDDGI/RayTracingSurface"
                 payload.normalWS = normalWS;
                 payload.albedo = saturate(_BaseMap.SampleLevel(sampler_BaseMap, uv, 0).rgb * _BaseColor.rgb);
                 payload.hit = 1;
+                payload.backFace = dot(WorldRayDirection(), normalWS) > 0.0 ? 1u : 0u;
             }
             ENDHLSL
         }

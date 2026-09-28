@@ -108,7 +108,8 @@ namespace Dou.DDGI
             bool hasPreviousVolume,
             float indirectBounceIntensity,
             Light shadowedMainLight = null,
-            int mainLightCascadeCount = 0)
+            int mainLightCascadeCount = 0,
+            ComputeBuffer probeStates = null)
         {
             if (commandBuffer == null)
                 throw new ArgumentNullException(nameof(commandBuffer));
@@ -116,6 +117,8 @@ namespace Dou.DDGI
                 throw new InvalidOperationException("Create the DDGI ray G-Buffer before evaluating radiance.");
             if (probePositions == null || !probePositions.IsValid())
                 throw new InvalidOperationException("Create the DDGI probe position buffer before evaluating radiance.");
+            if (probeStates == null || !probeStates.IsValid() || probeStates.count < gBuffer.ProbeCount)
+                throw new InvalidOperationException("Create the DDGI probe state buffer before evaluating radiance.");
             if (previousIrradianceAtlas == null || !previousIrradianceAtlas.IsCreated() ||
                 previousDistanceMomentsAtlas == null || !previousDistanceMomentsAtlas.IsCreated())
             {
@@ -144,6 +147,7 @@ namespace Dou.DDGI
             commandBuffer.SetComputeTextureParam(
                 computeShader, kernelIndex, DistanceMomentsAtlasId, previousDistanceMomentsAtlas);
             commandBuffer.SetComputeBufferParam(computeShader, kernelIndex, ProbePositionsId, probePositions);
+            commandBuffer.SetComputeBufferParam(computeShader, kernelIndex, "_DDGI_ProbeStates", probeStates);
             commandBuffer.SetComputeBufferParam(computeShader, kernelIndex, LightsId, lightBuffer);
             commandBuffer.SetComputeIntParam(computeShader, LightCountId, gpuLights.Count);
             commandBuffer.SetComputeVectorParam(

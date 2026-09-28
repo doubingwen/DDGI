@@ -4,8 +4,13 @@ namespace Dou.DDGI
 {
     public enum DDGIProbeState
     {
-        Inactive = 0,
-        Active = 1
+        Off = 0,
+        Vigilant = 1,
+        Uninitialized = 2,
+        Sleep = 3,
+        Awake = 4,
+        NewAwake = 5,
+        NewVigilant = 6
     }
 
     [ExecuteAlways]
@@ -21,14 +26,15 @@ namespace Dou.DDGI
         [SerializeField, HideInInspector] int linearIndex = -1;
         [SerializeField, HideInInspector] Vector3Int gridCoordinate;
         [SerializeField, HideInInspector] Vector2Int atlasTileCoordinate;
-        [SerializeField, HideInInspector] DDGIProbeState state = DDGIProbeState.Active;
+        [SerializeField, HideInInspector] DDGIProbeState state = DDGIProbeState.Uninitialized;
 
         public int LinearIndex => linearIndex;  // LinearIndex  会返回linerIndex
         public Vector3Int GridCoordinate => gridCoordinate;
         public Vector2Int AtlasTileCoordinate => atlasTileCoordinate;
         public Vector3 Position => transform.position;
         public DDGIProbeState State => state;
-        public bool IsActive => state == DDGIProbeState.Active;
+        public bool IsActive => state == DDGIProbeState.Vigilant || state == DDGIProbeState.Awake ||
+                                state == DDGIProbeState.NewAwake || state == DDGIProbeState.NewVigilant;
 
         //probe纹理起点
         public Vector2Int IrradianceTileOrigin => atlasTileCoordinate * IrradianceTileSize;
@@ -51,8 +57,10 @@ namespace Dou.DDGI
 
         public void SetActive(bool active)
         {
-            state = active ? DDGIProbeState.Active : DDGIProbeState.Inactive;
+            state = active ? DDGIProbeState.Vigilant : DDGIProbeState.Off;
         }
+
+        internal void SetRuntimeState(DDGIProbeState runtimeState) => state = runtimeState;
         //获得当前 Probe 在对应 Atlas 中的有效采样范围
         public Rect GetIrradianceInteriorUvRect(Vector2Int atlasResolution)
         {
@@ -97,9 +105,16 @@ namespace Dou.DDGI
 
         void OnDrawGizmos()
         {
-            Gizmos.color = IsActive
-                ? new Color(0.15f, 0.8f, 1.0f, 0.9f)
-                : new Color(0.45f, 0.45f, 0.45f, 0.8f);
+            Gizmos.color = state switch
+            {
+                DDGIProbeState.Off => Color.gray,
+                DDGIProbeState.Sleep => new Color(0.65f, 0.55f, 0.1f),
+                DDGIProbeState.Awake => new Color(1.0f, 0.65f, 0.1f),
+                DDGIProbeState.NewAwake => Color.magenta,
+                DDGIProbeState.NewVigilant => Color.red,
+                DDGIProbeState.Vigilant => Color.green,
+                _ => Color.white
+            };
             Gizmos.DrawWireSphere(Position, 0.12f);
         }
     }

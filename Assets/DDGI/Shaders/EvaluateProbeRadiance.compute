@@ -56,6 +56,15 @@ void EvaluateRadiance(uint3 dispatchThreadId : SV_DispatchThreadID)
     if (pixel.x >= (uint)_DDGI_RayTextureSize.x || pixel.y >= (uint)_DDGI_RayTextureSize.y)
         return;
 
+    uint2 probeState = _DDGI_ProbeStates[pixel.y];
+    if ((probeState.y & DDGI_PROBE_UPDATE) == 0) return;
+    if (probeState.x == DDGI_PROBE_OFF)
+    {
+        _DDGI_RayRadianceTexture[pixel] = 0.0;
+        _DDGI_RayShadowVisibilityTexture[pixel] = 0.0;
+        return;
+    }
+
     float4 positionSample = _DDGI_RayPositionTexture.Load(int3(pixel, 0));
     if (positionSample.a <= 0.0)
     {

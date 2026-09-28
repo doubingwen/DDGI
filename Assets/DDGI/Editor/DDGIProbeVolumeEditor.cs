@@ -6,6 +6,7 @@ using UnityEngine.Rendering.Universal;
 
 namespace Dou.DDGI.Editor
 {
+
     [CustomEditor(typeof(DDGIProbeVolume))]
     public sealed class DDGIProbeVolumeEditor : UnityEditor.Editor
     {
@@ -116,6 +117,24 @@ namespace Dou.DDGI.Editor
                 EditorStyles.wordWrappedLabel);
             EditorGUILayout.LabelField("Recorded GI Updates", volume.RecordedUpdateCount.ToString());
             EditorGUILayout.LabelField("Accumulated Frames", volume.AccumulatedFrameCount.ToString());
+            EditorGUILayout.Space();
+            EditorGUILayout.LabelField("Probe State Statistics (Async GPU)", EditorStyles.boldLabel);
+            if (volume.HasProbeStateStatistics)
+            {
+                foreach (DDGIProbeState state in System.Enum.GetValues(typeof(DDGIProbeState)))
+                    EditorGUILayout.LabelField(state.ToString(), volume.GetProbeStateCount(state).ToString());
+                EditorGUILayout.LabelField("Scheduled Probe Updates", $"{volume.LastUpdatedProbeCount} / {volume.ProbeCount}");
+                EditorGUILayout.LabelField("Scheduled Rays", (volume.LastUpdatedProbeCount * volume.RaysPerProbe).ToString());
+            }
+            else EditorGUILayout.LabelField("Waiting for GPU state readback");
+            if (GUILayout.Button("Reclassify Probes"))
+            {
+                volume.ReclassifyProbes();
+                SceneView.RepaintAll();
+            }
+            EditorGUILayout.HelpBox("Mark fixed geometry Static. Unmarked MeshRenderers are treated as dynamic. " +
+                "Off probes are excluded from interpolation; sleeping probes retain their atlases. " +
+                "Statistics refresh asynchronously about twice per second.", MessageType.Info);
             EditorGUILayout.LabelField("Rendered Volume Count", DDGICompositeFeature.RenderedVolumeCount.ToString());
             if (!string.IsNullOrEmpty(DDGICompositeFeature.LastRenderedCamera))
                 EditorGUILayout.LabelField("Last Rendered Camera", DDGICompositeFeature.LastRenderedCamera);

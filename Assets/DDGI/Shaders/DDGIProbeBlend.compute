@@ -1,5 +1,8 @@
 #pragma kernel BlendIrradiance
 #pragma kernel BlendDistanceMoments
+#pragma kernel PrepareProbeStates
+#pragma kernel ClassifyProbes
+#include "DDGIProbeState.hlsl"
 
 #define DDGI_GOLDEN_ANGLE 2.39996322972865332223
 #define DDGI_IRRADIANCE_RESOLUTION 6
@@ -14,6 +17,19 @@ Texture2D<float2> _DDGI_PreviousDistanceMomentsAtlas;
 RWTexture2D<float4> _DDGI_IrradianceAtlas;
 RWTexture2D<float2> _DDGI_DistanceMomentsAtlas;
 StructuredBuffer<float3> _DDGI_ProbePositions;
+RWStructuredBuffer<uint2> _DDGI_ProbeStates;
+Texture2D<float4> _DDGI_RayNormalTexture;
+struct DDGIGeometryBounds { float4 minimum; float4 maximum; };
+StructuredBuffer<DDGIGeometryBounds> _DDGI_GeometryBounds;
+StructuredBuffer<DDGIGeometryBounds> _DDGI_ChangedGeometryBounds;
+uint _DDGI_GeometryCount;
+uint _DDGI_ChangedGeometryCount;
+uint _DDGI_StateUpdateSequence;
+uint _DDGI_StateRecheckInterval;
+int _DDGI_EnableProbeClassification;
+int _DDGI_ResetProbeClassification;
+float _DDGI_ProbeInfluenceRadius;
+float _DDGI_InteriorBackfaceThreshold;
 
 uint _DDGI_ProbeCount;
 uint _DDGI_RayCount;
@@ -25,6 +41,91 @@ int _DDGI_HasBlendHistory;
 float _DDGI_IrradianceHysteresis;
 float _DDGI_DistanceHysteresis;
 float _DDGI_TemporalGamma;
+
+bool IsNearBounds(float3 position, DDGIGeometryBounds bounds)
+{
+    float3 delta = position - clamp(position, bounds.minimum.xyz, bounds.maximum.xyz);
+    return dot(delta, delta) <= _DDGI_ProbeInfluenceRadius * _DDGI_ProbeInfluenceRadius;
+}
+
+[numthreads(64, 1, 1)]
+void PrepareProbeStates(uint3 id : SV_DispatchThreadID)
+{
+    uint index = id.x;
+    if (index >= _DDGI_ProbeCount) return;
+    uint oldState = _DDGI_ProbeStates[index].x;
+    if (_DDGI_EnableProbeClassification == 0)
+    {
+        _DDGI_ProbeStates[index] = uint2(DDGI_PROBE_VIGILANT,
+            DDGI_PROBE_UPDATE | (oldState == DDGI_PROBE_OFF || oldState == DDGI_PROBE_SLEEP ||
+            oldState == DDGI_PROBE_UNINITIALIZED ? DDGI_PROBE_RESET_HISTORY : 0u));
+        return;
+    }
+    float3 position = _DDGI_ProbePositions[index];
+    uint nearby = 0;
+    for (uint i = 0; i < _DDGI_GeometryCount; ++i)
+        if (IsNearBounds(position, _DDGI_GeometryBounds[i]))
+            nearby |= _DDGI_GeometryBounds[i].minimum.w > 0.0
+                ? DDGI_PROBE_DYNAMIC_NEARBY : DDGI_PROBE_STATIC_NEARBY;
+    bool changed = false;
+    for (uint j = 0; j < _DDGI_ChangedGeometryCount; ++j)
+        changed = changed || IsNearBounds(position, _DDGI_ChangedGeometryBounds[j]);
+    bool dormant = oldState == DDGI_PROBE_OFF || oldState == DDGI_PROBE_SLEEP;
+    bool recheck = ((_DDGI_StateUpdateSequence + index) % _DDGI_StateRecheckInterval) == 0;
+    // Periodic checks prevent a mistaken interior classification becoming permanent.
+    bool classify = _DDGI_ResetProbeClassification != 0 ||
+        oldState == DDGI_PROBE_UNINITIALIZED || (dormant && (changed || recheck ||
+        (nearby & DDGI_PROBE_DYNAMIC_NEARBY) != 0));
+    if (classify)
+    {
+        _DDGI_ProbeStates[index] = uint2(DDGI_PROBE_UNINITIALIZED,
+            nearby | DDGI_PROBE_UPDATE | DDGI_PROBE_CLASSIFY | DDGI_PROBE_RESET_HISTORY);
+        return;
+    }
+    if (oldState == DDGI_PROBE_OFF)
+    {
+        _DDGI_ProbeStates[index] = uint2(oldState, 0);
+        return;
+    }
+    bool dynamicNearby = (nearby & DDGI_PROBE_DYNAMIC_NEARBY) != 0;
+    // Static proximity is decided from ray hits, not a mesh's potentially huge AABB.
+    bool staticNearby = oldState == DDGI_PROBE_VIGILANT || oldState == DDGI_PROBE_NEW_VIGILANT;
+    uint state = dynamicNearby ? DDGI_PROBE_AWAKE : staticNearby ? DDGI_PROBE_VIGILANT : DDGI_PROBE_SLEEP;
+    bool waking = (dynamicNearby && oldState != DDGI_PROBE_AWAKE && oldState != DDGI_PROBE_NEW_AWAKE) ||
+        (!dynamicNearby && staticNearby && oldState != DDGI_PROBE_VIGILANT && oldState != DDGI_PROBE_NEW_VIGILANT);
+    if (waking) state = dynamicNearby ? DDGI_PROBE_NEW_AWAKE : DDGI_PROBE_NEW_VIGILANT;
+    uint flags = nearby | (state != DDGI_PROBE_SLEEP ? DDGI_PROBE_UPDATE : 0u);
+    if (waking || (changed && !dynamicNearby)) flags |= DDGI_PROBE_RESET_HISTORY;
+    // Removed static geometry must also be reclassified after its old bounds changed.
+    if (!dynamicNearby && (changed || oldState == DDGI_PROBE_AWAKE || oldState == DDGI_PROBE_NEW_AWAKE))
+        flags |= DDGI_PROBE_CLASSIFY | DDGI_PROBE_UPDATE | DDGI_PROBE_RESET_HISTORY;
+    _DDGI_ProbeStates[index] = uint2(state, flags);
+}
+
+[numthreads(64, 1, 1)]
+void ClassifyProbes(uint3 id : SV_DispatchThreadID)
+{
+    uint index = id.x;
+    if (index >= _DDGI_ProbeCount) return;
+    uint2 state = _DDGI_ProbeStates[index];
+    if ((state.y & DDGI_PROBE_CLASSIFY) == 0) return;
+    uint backfaces = 0;
+    float nearest = _DDGI_MaxRayDistance + 1.0;
+    for (uint ray = 0; ray < _DDGI_RayCount; ++ray)
+    {
+        float4 position = _DDGI_RayPositionTexture.Load(int3(ray, index, 0));
+        if (position.a <= 0.0) continue;
+        nearest = min(nearest, length(position.xyz - _DDGI_ProbePositions[index]));
+        backfaces += _DDGI_RayNormalTexture.Load(int3(ray, index, 0)).a < 0.0 ? 1u : 0u;
+    }
+    bool dynamicNearby = (state.y & DDGI_PROBE_DYNAMIC_NEARBY) != 0;
+    bool insideStatic = !dynamicNearby && (state.y & DDGI_PROBE_STATIC_NEARBY) != 0 &&
+        backfaces >= ceil(_DDGI_RayCount * _DDGI_InteriorBackfaceThreshold);
+    state.x = insideStatic ? DDGI_PROBE_OFF : dynamicNearby ? DDGI_PROBE_NEW_AWAKE :
+        nearest <= _DDGI_ProbeInfluenceRadius ? DDGI_PROBE_NEW_VIGILANT : DDGI_PROBE_SLEEP;
+    // Keep UPDATE for this first initialization, including empty and interior tiles.
+    _DDGI_ProbeStates[index] = state;
+}
 
 float SignNotZero(float value)
 {
@@ -140,10 +241,13 @@ void BlendIrradiance(
     if (probeIndex >= _DDGI_ProbeCount)
         return;
 
+    uint2 probeState = _DDGI_ProbeStates[probeIndex];
+    bool shouldUpdate = (probeState.y & DDGI_PROBE_UPDATE) != 0;
+
     uint2 tileOrigin = tileCoordinate * DDGI_IRRADIANCE_TILE_SIZE;
     uint2 tileTexel = groupThreadId.xy;
 
-    if (tileTexel.x < DDGI_IRRADIANCE_RESOLUTION &&
+    if (shouldUpdate && tileTexel.x < DDGI_IRRADIANCE_RESOLUTION &&
         tileTexel.y < DDGI_IRRADIANCE_RESOLUTION)
     {
         float3 texelDirection = GetOctahedralTexelDirection(
@@ -164,7 +268,8 @@ void BlendIrradiance(
 
         uint2 destination = tileOrigin + tileTexel + 1;
         float3 irradiance = max(weightedRadiance / max(totalWeight, 1e-6), 0.0);
-        if (_DDGI_HasBlendHistory != 0)
+        if (probeState.x == DDGI_PROBE_OFF) irradiance = 0.0;
+        if (_DDGI_HasBlendHistory != 0 && (probeState.y & DDGI_PROBE_RESET_HISTORY) == 0)
         {
             float3 previous = max(_DDGI_PreviousIrradianceAtlas.Load(int3(destination, 0)).rgb, 0.0);
             float inverseGamma = rcp(_DDGI_TemporalGamma);
@@ -177,8 +282,9 @@ void BlendIrradiance(
         _DDGI_IrradianceAtlas[destination] = float4(irradiance, 1.0);
     }
 
+    // Every thread reaches this barrier, including sleeping probes (Unity's SM5 compiler).
     DeviceMemoryBarrierWithGroupSync();
-    FillIrradianceBorder(tileOrigin, tileTexel);
+    if (shouldUpdate) FillIrradianceBorder(tileOrigin, tileTexel);
 }
 
 [numthreads(DDGI_DISTANCE_TILE_SIZE, DDGI_DISTANCE_TILE_SIZE, 1)]
@@ -191,10 +297,13 @@ void BlendDistanceMoments(
     if (probeIndex >= _DDGI_ProbeCount)
         return;
 
+    uint2 probeState = _DDGI_ProbeStates[probeIndex];
+    bool shouldUpdate = (probeState.y & DDGI_PROBE_UPDATE) != 0;
+
     uint2 tileOrigin = tileCoordinate * DDGI_DISTANCE_TILE_SIZE;
     uint2 tileTexel = groupThreadId.xy;
 
-    if (tileTexel.x < DDGI_DISTANCE_RESOLUTION &&
+    if (shouldUpdate && tileTexel.x < DDGI_DISTANCE_RESOLUTION &&
         tileTexel.y < DDGI_DISTANCE_RESOLUTION)
     {
         float3 texelDirection = GetOctahedralTexelDirection(
@@ -226,7 +335,9 @@ void BlendDistanceMoments(
         float2 moments = float2(
             weightedDistance * inverseWeight,
             weightedDistanceSquared * inverseWeight);
-        if (_DDGI_HasBlendHistory != 0)
+        if (probeState.x == DDGI_PROBE_OFF)
+            moments = float2(_DDGI_MaxRayDistance, _DDGI_MaxRayDistance * _DDGI_MaxRayDistance);
+        if (_DDGI_HasBlendHistory != 0 && (probeState.y & DDGI_PROBE_RESET_HISTORY) == 0)
         {
             float2 previous = _DDGI_PreviousDistanceMomentsAtlas.Load(int3(destination, 0));
             moments = lerp(moments, previous, _DDGI_DistanceHysteresis);
@@ -237,5 +348,5 @@ void BlendDistanceMoments(
     }
 
     DeviceMemoryBarrierWithGroupSync();
-    FillDistanceBorder(tileOrigin, tileTexel);
+    if (shouldUpdate) FillDistanceBorder(tileOrigin, tileTexel);
 }

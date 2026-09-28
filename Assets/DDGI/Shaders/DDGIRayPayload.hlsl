@@ -8,6 +8,7 @@ struct DDGIRayPayload
     float3 normalWS;
     uint hit;
     float3 albedo;
+    uint backFace;
 };
 
 struct DDGIIntersectionAttributes

@@ -1,9 +1,190 @@
 using System;
+using System.Collections.Generic;
 using UnityEngine;
 using UnityEngine.Rendering;
 
 namespace Dou.DDGI
 {
+    // GPU owns classifications; CPU only supplies geometry bounds and asynchronous diagnostics.
+    internal sealed class DDGIProbeStateScheduler : IDisposable
+    {
+        struct GeometryBounds
+        {
+            public Vector4 minimum;
+            public Vector4 maximum;
+            public GeometryBounds(Bounds bounds, bool dynamic)
+            {
+                Vector3 min = bounds.min;
+                Vector3 max = bounds.max;
+                minimum = new Vector4(min.x, min.y, min.z, dynamic ? 1.0f : 0.0f);
+                maximum = new Vector4(max.x, max.y, max.z, 0.0f);
+            }
+        }
+
+        struct GeometrySnapshot
+        {
+            public Bounds bounds;
+            public Matrix4x4 matrix;
+            public Mesh mesh;
+            public int firstSubMesh;
+            public bool dynamic;
+        }
+
+        readonly ComputeShader shader;
+        readonly int prepareKernel;
+        readonly int classifyKernel;
+        readonly Dictionary<int, GeometrySnapshot> previousGeometry = new Dictionary<int, GeometrySnapshot>();
+        readonly Dictionary<int, GeometrySnapshot> currentGeometry = new Dictionary<int, GeometrySnapshot>();
+        readonly List<GeometryBounds> geometry = new List<GeometryBounds>();
+        readonly List<GeometryBounds> changedGeometry = new List<GeometryBounds>();
+        ComputeBuffer geometryBuffer;
+        ComputeBuffer changedGeometryBuffer;
+        uint updateSequence;
+        bool readbackPending;
+        double nextReadbackTime;
+        bool resetRequested = true;
+        bool previousClassificationEnabled;
+        float previousInfluenceRadius;
+        float previousBackfaceThreshold;
+        public ComputeBuffer States { get; private set; }
+        public int[] StateCounts { get; } = new int[7];
+        public int UpdatedProbeCount { get; private set; }
+        public bool HasStatistics { get; private set; }
+
+        public DDGIProbeStateScheduler(ComputeShader shader, int probeCount)
+        {
+            this.shader = shader;
+            prepareKernel = shader.FindKernel("PrepareProbeStates");
+            classifyKernel = shader.FindKernel("ClassifyProbes");
+            States = new ComputeBuffer(probeCount, sizeof(uint) * 2, ComputeBufferType.Structured)
+                { name = "DDGI Probe States (state, flags)" };
+            var initial = new Vector2Int[probeCount];
+            for (int i = 0; i < initial.Length; ++i)
+                initial[i] = new Vector2Int((int)DDGIProbeState.Uninitialized, 0);
+            States.SetData(initial);
+        }
+
+        public void RequestReset() => resetRequested = true;
+
+        public void RecordPrepare(CommandBuffer commands, ComputeBuffer positions, DDGIRayGBuffer gBuffer,
+            LayerMask layers, float radius, float maxDistance, bool enabled, float backfaceThreshold,
+            int recheckInterval)
+        {
+            if (previousClassificationEnabled != enabled || previousInfluenceRadius != radius ||
+                previousBackfaceThreshold != backfaceThreshold)
+                resetRequested = true;
+            previousClassificationEnabled = enabled;
+            previousInfluenceRadius = radius;
+            previousBackfaceThreshold = backfaceThreshold;
+            CollectGeometry(layers);
+            EnsureBuffer(ref geometryBuffer, geometry.Count);
+            EnsureBuffer(ref changedGeometryBuffer, changedGeometry.Count);
+            if (geometry.Count > 0) commands.SetBufferData(geometryBuffer, geometry.ToArray());
+            if (changedGeometry.Count > 0) commands.SetBufferData(changedGeometryBuffer, changedGeometry.ToArray());
+            commands.SetComputeBufferParam(shader, prepareKernel, "_DDGI_ProbeStates", States);
+            commands.SetComputeBufferParam(shader, prepareKernel, "_DDGI_ProbePositions", positions);
+            commands.SetComputeBufferParam(shader, prepareKernel, "_DDGI_GeometryBounds", geometryBuffer);
+            commands.SetComputeBufferParam(shader, prepareKernel, "_DDGI_ChangedGeometryBounds", changedGeometryBuffer);
+            commands.SetComputeIntParam(shader, "_DDGI_ProbeCount", States.count);
+            commands.SetComputeIntParam(shader, "_DDGI_GeometryCount", geometry.Count);
+            commands.SetComputeIntParam(shader, "_DDGI_ChangedGeometryCount", changedGeometry.Count);
+            commands.SetComputeIntParam(shader, "_DDGI_StateUpdateSequence", unchecked((int)updateSequence++));
+            commands.SetComputeIntParam(shader, "_DDGI_StateRecheckInterval", Mathf.Max(1, recheckInterval));
+            commands.SetComputeIntParam(shader, "_DDGI_EnableProbeClassification", enabled ? 1 : 0);
+            commands.SetComputeIntParam(shader, "_DDGI_ResetProbeClassification", resetRequested ? 1 : 0);
+            commands.SetComputeFloatParam(shader, "_DDGI_ProbeInfluenceRadius", radius);
+            commands.SetComputeFloatParam(shader, "_DDGI_InteriorBackfaceThreshold", Mathf.Clamp(backfaceThreshold, 0.9f, 1.0f));
+            commands.SetComputeFloatParam(shader, "_DDGI_MaxRayDistance", maxDistance);
+            commands.SetComputeIntParam(shader, "_DDGI_RayCount", gBuffer.RayCount);
+            commands.DispatchCompute(shader, prepareKernel, (States.count + 63) / 64, 1, 1);
+            resetRequested = false;
+        }
+
+        public void RecordClassify(CommandBuffer commands, ComputeBuffer positions, DDGIRayGBuffer gBuffer)
+        {
+            commands.SetComputeBufferParam(shader, classifyKernel, "_DDGI_ProbeStates", States);
+            commands.SetComputeBufferParam(shader, classifyKernel, "_DDGI_ProbePositions", positions);
+            commands.SetComputeTextureParam(shader, classifyKernel, "_DDGI_RayPositionTexture", gBuffer.PositionTexture);
+            commands.SetComputeTextureParam(shader, classifyKernel, "_DDGI_RayNormalTexture", gBuffer.NormalTexture);
+            commands.DispatchCompute(shader, classifyKernel, (States.count + 63) / 64, 1, 1);
+        }
+
+        public void RecordStatistics(CommandBuffer commands, Action<Vector2Int[]> onReadback)
+        {
+            if (readbackPending || Time.realtimeSinceStartupAsDouble < nextReadbackTime ||
+                !SystemInfo.supportsAsyncGPUReadback) return;
+            readbackPending = true;
+            nextReadbackTime = Time.realtimeSinceStartupAsDouble + 0.5;
+            ComputeBuffer requestedBuffer = States;
+            commands.RequestAsyncReadback(requestedBuffer, request =>
+            {
+                readbackPending = false;
+                if (States != requestedBuffer || request.hasError) return;
+                var data = request.GetData<Vector2Int>().ToArray();
+                Array.Clear(StateCounts, 0, StateCounts.Length);
+                UpdatedProbeCount = 0;
+                foreach (Vector2Int value in data)
+                {
+                    if ((uint)value.x < StateCounts.Length) StateCounts[value.x]++;
+                    if ((value.y & 1) != 0) UpdatedProbeCount++;
+                }
+                HasStatistics = true;
+                onReadback(data);
+            });
+        }
+
+        void CollectGeometry(LayerMask layers)
+        {
+            geometry.Clear();
+            changedGeometry.Clear();
+            currentGeometry.Clear();
+            foreach (MeshRenderer renderer in UnityEngine.Object.FindObjectsByType<MeshRenderer>(
+                FindObjectsInactive.Exclude, FindObjectsSortMode.None))
+            {
+                if (!DDGIRayTracingScene.IsCaptureGeometry(renderer, layers)) continue;
+                int id = renderer.GetInstanceID();
+                var snapshot = new GeometrySnapshot
+                {
+                    bounds = renderer.bounds,
+                    matrix = renderer.localToWorldMatrix,
+                    mesh = renderer.GetComponent<MeshFilter>().sharedMesh,
+                    firstSubMesh = renderer.subMeshStartIndex,
+                    dynamic = !renderer.gameObject.isStatic
+                };
+                currentGeometry.Add(id, snapshot);
+                geometry.Add(new GeometryBounds(snapshot.bounds, snapshot.dynamic));
+                bool existed = previousGeometry.TryGetValue(id, out GeometrySnapshot old);
+                if (!existed || old.bounds != snapshot.bounds || old.matrix != snapshot.matrix ||
+                    old.mesh != snapshot.mesh || old.firstSubMesh != snapshot.firstSubMesh ||
+                    old.dynamic != snapshot.dynamic)
+                {
+                    if (existed) changedGeometry.Add(new GeometryBounds(old.bounds, old.dynamic));
+                    changedGeometry.Add(new GeometryBounds(snapshot.bounds, snapshot.dynamic));
+                }
+            }
+            foreach (var entry in previousGeometry)
+                if (!currentGeometry.ContainsKey(entry.Key))
+                    changedGeometry.Add(new GeometryBounds(entry.Value.bounds, entry.Value.dynamic));
+            previousGeometry.Clear();
+            foreach (var entry in currentGeometry) previousGeometry.Add(entry.Key, entry.Value);
+        }
+
+        static void EnsureBuffer(ref ComputeBuffer buffer, int count)
+        {
+            if (buffer != null && buffer.count >= Mathf.Max(1, count)) return;
+            buffer?.Release();
+            buffer = new ComputeBuffer(Mathf.NextPowerOfTwo(Mathf.Max(1, count)), sizeof(float) * 8);
+        }
+
+        public void Dispose()
+        {
+            States?.Release();
+            States = null;
+            geometryBuffer?.Release();
+            changedGeometryBuffer?.Release();
+        }
+    }
+
     public sealed class DDGIProbeBlender
     {
         const string IrradianceKernelName = "BlendIrradiance";
@@ -56,7 +237,8 @@ namespace Dou.DDGI
             bool hasHistory,
             float irradianceHysteresis,
             float distanceHysteresis,
-            float temporalGamma)
+            float temporalGamma,
+            ComputeBuffer probeStates)
         {
             ValidateArguments(
                 commandBuffer,
@@ -93,6 +275,10 @@ namespace Dou.DDGI
             commandBuffer.SetComputeFloatParam(computeShader, TemporalGammaId, Mathf.Max(1.0f, temporalGamma));
 
             int atlasTileRows = DivideRoundUp(gBuffer.ProbeCount, atlasTilesPerRow);
+            commandBuffer.SetComputeBufferParam(computeShader, irradianceKernelIndex,
+                "_DDGI_ProbeStates", probeStates);
+            commandBuffer.SetComputeBufferParam(computeShader, distanceKernelIndex,
+                "_DDGI_ProbeStates", probeStates);
 
             commandBuffer.SetComputeTextureParam(
                 computeShader,

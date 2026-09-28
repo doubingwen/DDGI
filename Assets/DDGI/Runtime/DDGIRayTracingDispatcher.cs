@@ -32,7 +32,8 @@ namespace Dou.DDGI
             DDGIRayGBuffer target,
             float minimumRayDistance,
             float maximumRayDistance,
-            Matrix4x4 rayRotation)
+            Matrix4x4 rayRotation,
+            ComputeBuffer probeStates)
         {
             ValidateArguments(
                 commandBuffer,
@@ -41,8 +42,14 @@ namespace Dou.DDGI
                 target,
                 minimumRayDistance,
                 maximumRayDistance);
+            if (probeStates == null || !probeStates.IsValid() || probeStates.count < target.ProbeCount)
+                throw new InvalidOperationException("Create the probe state buffer before tracing rays.");
 
             commandBuffer.SetRayTracingShaderPass(rayTracingShader, ShaderPassName);
+            commandBuffer.SetRayTracingBufferParam(rayTracingShader, "_DDGI_ProbeStates",
+                probeStates);
+            commandBuffer.SetRayTracingIntParam(rayTracingShader, "_DDGI_UseProbeStates",
+                1);
             commandBuffer.SetRayTracingAccelerationStructure(
                 rayTracingShader,
                 AccelerationStructureId,

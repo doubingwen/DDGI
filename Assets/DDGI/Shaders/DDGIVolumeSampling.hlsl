@@ -1,5 +1,7 @@
 #ifndef DOU_DDGI_VOLUME_SAMPLING_INCLUDED
 #define DOU_DDGI_VOLUME_SAMPLING_INCLUDED
+#include "DDGIProbeState.hlsl"
+StructuredBuffer<uint2> _DDGI_ProbeStates;
 
 #define DDGI_PI 3.14159265359
 #define DDGI_IRRADIANCE_RESOLUTION 6.0
@@ -219,6 +221,12 @@ float3 DDGISampleIrradiance(
         int3 probeOffset = DDGI_PROBE_OFFSETS[cornerIndex];
         int3 probeCoordinate = min(baseCoordinate + probeOffset, probeCounts - 1);
         int probeIndex = DDGIFlattenProbeCoordinate(probeCoordinate, probeCounts);
+        uint2 probeState = _DDGI_ProbeStates[probeIndex];
+        if (probeState.x == DDGI_PROBE_OFF || probeState.x == DDGI_PROBE_UNINITIALIZED)
+            continue;
+#if defined(DDGI_SAMPLE_PREVIOUS_FRAME)
+        if ((probeState.y & DDGI_PROBE_RESET_HISTORY) != 0) continue;
+#endif
         float3 probeWorldPosition = DDGIGetProbeWorldPosition(probeCoordinate);
         float3 pointToProbe = probeWorldPosition - worldPosition;
         float3 pointToProbeDirection = pointToProbe / max(length(pointToProbe), 1e-5);

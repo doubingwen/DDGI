@@ -22,6 +22,7 @@ namespace Dou.DDGI
         public int InstanceCount { get; private set; }
         public uint BuiltInstanceCount { get; private set; }
         public ulong AccelerationStructureSize { get; private set; }
+        public int StaticBatchedRendererCount { get; private set; }
 
         public DDGIRayTracingScene(Material rayTracingMaterial)
         {
@@ -49,6 +50,7 @@ namespace Dou.DDGI
 
             instanceProperties.Clear();
             InstanceCount = 0;
+            StaticBatchedRendererCount = 0;
 
             MeshRenderer[] renderers = UnityEngine.Object.FindObjectsByType<MeshRenderer>(
                 FindObjectsInactive.Exclude,
@@ -73,12 +75,7 @@ namespace Dou.DDGI
 
         void AddMeshRenderer(MeshRenderer meshRenderer, LayerMask geometryLayers)
         {
-            if (!meshRenderer.enabled ||
-                (geometryLayers.value & (1 << meshRenderer.gameObject.layer)) == 0 ||
-                IsProbeVisualization(meshRenderer))
-            {
-                return;
-            }
+            if (!IsCaptureGeometry(meshRenderer, geometryLayers)) return;
 
             MeshFilter meshFilter = meshRenderer.GetComponent<MeshFilter>();
             Mesh mesh = meshFilter != null ? meshFilter.sharedMesh : null;
@@ -86,10 +83,12 @@ namespace Dou.DDGI
                 return;
 
             Material[] sourceMaterials = meshRenderer.sharedMaterials;
-            int subMeshCount = Mathf.Min(mesh.subMeshCount, sourceMaterials.Length);
-            for (int subMeshIndex = 0; subMeshIndex < subMeshCount; subMeshIndex++)
+            int firstSubMesh = meshRenderer.subMeshStartIndex;
+            int subMeshCount = GetRendererSubMeshCount(mesh, firstSubMesh, sourceMaterials.Length);
+            if (meshRenderer.isPartOfStaticBatch) StaticBatchedRendererCount++;
+            for (int materialIndex = 0; materialIndex < subMeshCount; materialIndex++)
             {
-                Material sourceMaterial = sourceMaterials[subMeshIndex];
+                Material sourceMaterial = sourceMaterials[materialIndex];
                 if (sourceMaterial == null)
                     continue;
 
@@ -98,7 +97,8 @@ namespace Dou.DDGI
 
                 var config = new RayTracingMeshInstanceConfig(
                     mesh,
-                    (uint)subMeshIndex,
+                    // Static batching combines meshes, but each renderer owns only its submesh range.
+                    (uint)(firstSubMesh + materialIndex),
                     rayTracingMaterial)
                 {
                     materialProperties = properties,
@@ -124,6 +124,26 @@ namespace Dou.DDGI
         {
             return meshRenderer.GetComponentInParent<DDGIProbe>() != null ||
                    meshRenderer.GetComponent("RadianceProbe") != null;
+        }
+
+        internal static bool IsCaptureGeometry(MeshRenderer renderer, LayerMask layers)
+        {
+            if (renderer == null || !renderer.enabled || !renderer.gameObject.activeInHierarchy ||
+                (layers.value & (1 << renderer.gameObject.layer)) == 0 || IsProbeVisualization(renderer))
+                return false;
+            MeshFilter filter = renderer.GetComponent<MeshFilter>();
+            if (filter == null || filter.sharedMesh == null) return false;
+            Material[] materials = renderer.sharedMaterials;
+            int count = GetRendererSubMeshCount(filter.sharedMesh, renderer.subMeshStartIndex, materials.Length);
+            for (int i = 0; i < count; ++i)
+                if (materials[i] != null) return true;
+            return false;
+        }
+
+        static int GetRendererSubMeshCount(Mesh mesh, int firstSubMesh, int materialCount)
+        {
+            if (firstSubMesh < 0 || firstSubMesh >= mesh.subMeshCount) return 0;
+            return Mathf.Min(mesh.subMeshCount - firstSubMesh, materialCount);
         }
 
         static MaterialPropertyBlock CreateMaterialProperties(Material sourceMaterial)
@@ -161,6 +181,7 @@ namespace Dou.DDGI
             InstanceCount = 0;
             BuiltInstanceCount = 0;
             AccelerationStructureSize = 0;
+            StaticBatchedRendererCount = 0;
             instanceProperties.Clear();
         }
     }

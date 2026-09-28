@@ -1,11 +1,14 @@
 #pragma max_recursion_depth 1  //递归深度，只发射一次
 
 #include "Assets/DDGI/Shaders/DDGIRayPayload.hlsl"
+#include "DDGIProbeState.hlsl"
 
 #define DDGI_GOLDEN_ANGLE 2.39996322972865332223
 
 RaytracingAccelerationStructure _DDGI_AccelerationStructure;
 StructuredBuffer<float3> _DDGI_ProbePositions;
+StructuredBuffer<uint2> _DDGI_ProbeStates;
+int _DDGI_UseProbeStates;
 
 RWTexture2D<float4> _DDGI_RayPositionTexture;
 RWTexture2D<float4> _DDGI_RayNormalTexture;
@@ -42,6 +45,9 @@ void DDGIRayGeneration()
     uint2 outputCoordinate = DispatchRaysIndex().xy;
     uint rayIndex = outputCoordinate.x;
     uint probeIndex = outputCoordinate.y;
+    if (_DDGI_UseProbeStates != 0 &&
+        (_DDGI_ProbeStates[probeIndex].y & DDGI_PROBE_UPDATE) == 0)
+        return;
 
     float3 localDirection = FibonacciSphereDirection(rayIndex, _DDGI_RayCount);
     float3 rayDirection = normalize(mul((float3x3)_DDGI_RayRotation, localDirection));
@@ -58,6 +64,7 @@ void DDGIRayGeneration()
     payload.normalWS = 0.0;
     payload.hit = 0;
     payload.albedo = 0.0;
+    payload.backFace = 0;
 
     TraceRay(
         _DDGI_AccelerationStructure,
@@ -73,7 +80,7 @@ void DDGIRayGeneration()
         ? float4(payload.positionWS, 1.0)
         : 0.0;
     _DDGI_RayNormalTexture[outputCoordinate] = payload.hit != 0
-        ? float4(payload.normalWS, 1.0)
+        ? float4(payload.normalWS, payload.backFace != 0 ? -1.0 : 1.0)
         : 0.0;
     _DDGI_RayAlbedoTexture[outputCoordinate] = payload.hit != 0
         ? float4(payload.albedo, 1.0)

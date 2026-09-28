@@ -96,6 +96,7 @@ namespace Dou.DDGI.Editor
             var rayGBuffer = new DDGIRayGBuffer();
             var rayTracingScene = new DDGIRayTracingScene(surfaceMaterial);
             ComputeBuffer probePositions = null;
+            ComputeBuffer probeStates = null;
             CommandBuffer commandBuffer = null;
 
             try
@@ -105,6 +106,8 @@ namespace Dou.DDGI.Editor
 
                 probePositions = new ComputeBuffer(1, sizeof(float) * 3);
                 probePositions.SetData(new[] { probePosition });
+                probeStates = new ComputeBuffer(1, sizeof(uint) * 2);
+                probeStates.SetData(new[] { new Vector2Int((int)DDGIProbeState.Vigilant, 1) });
 
                 var dispatcher = new DDGIRayTracingDispatcher(rayTracingShader);
                 commandBuffer = new CommandBuffer { name = "DDGI Single Probe Capture" };
@@ -116,7 +119,8 @@ namespace Dou.DDGI.Editor
                     rayGBuffer,
                     0.01f,
                     100.0f,
-                    Matrix4x4.identity);
+                    Matrix4x4.identity,
+                    probeStates);
                 Graphics.ExecuteCommandBuffer(commandBuffer);
 
                 SavePreviews(rayGBuffer);
@@ -131,6 +135,7 @@ namespace Dou.DDGI.Editor
             {
                 commandBuffer?.Release();
                 probePositions?.Release();
+                probeStates?.Release();
                 rayTracingScene.Dispose();
                 rayGBuffer.Dispose();
                 Object.DestroyImmediate(surfaceMaterial);

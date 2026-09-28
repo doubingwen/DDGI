@@ -80,6 +80,15 @@ namespace Dou.DDGI
         [SerializeField] ComputeShader probeBlendComputeShader;
         [SerializeField, Min(1.0f)] float distanceSharpness = 50.0f;
 
+        [Header("Probe State Scheduling")]
+        [SerializeField] bool enableProbeClassification = true;
+        [Tooltip("Radius multiplier for geometry proximity. One covers a full probe cell diagonal.")]
+        [SerializeField, Min(1.0f)] float probeInfluenceRadiusScale = 1.0f;
+        [Tooltip("Fraction of all rays hitting backfaces required to disable an interior static probe.")]
+        [SerializeField, Range(0.9f, 1.0f)] float interiorBackfaceThreshold = 0.95f;
+        [Tooltip("Staggered safety rechecks for dormant probes, measured in volume updates.")]
+        [SerializeField, Min(1)] int dormantRecheckInterval = 64;
+
         [Header("Temporal Supersampling")]
         [SerializeField] bool enableTemporalAccumulation = true;
         [SerializeField] bool rotateRayDirections = true;
@@ -115,6 +124,9 @@ namespace Dou.DDGI
         DDGIRayTracingDispatcher rayTracingDispatcher;
         DDGIRadianceEvaluator radianceEvaluator;
         DDGIProbeBlender probeBlender;
+        DDGIProbeStateScheduler probeStateScheduler;
+        bool hasLoggedCaptureDiagnostics;
+        bool hasRequestedTextureDiagnostics;
         int lastRadianceUpdateFrame = -1;
         bool pendingShadowedEvaluation;
         bool hasValidRadianceHistory;
@@ -167,6 +179,10 @@ namespace Dou.DDGI
         public int RecordedUpdateCount { get; private set; }
         public int AccumulatedFrameCount { get; private set; }
         public bool HasPendingShadowedEvaluation => pendingShadowedEvaluation;
+        public bool HasProbeStateStatistics => probeStateScheduler?.HasStatistics ?? false;
+        public int LastUpdatedProbeCount => probeStateScheduler?.UpdatedProbeCount ?? 0;
+        public int GetProbeStateCount(DDGIProbeState state) =>
+            probeStateScheduler != null ? probeStateScheduler.StateCounts[(int)state] : 0;
 
         public bool HasValidResources =>
             irradianceAtlas != null && irradianceAtlas.IsCreated() &&
@@ -174,6 +190,8 @@ namespace Dou.DDGI
             previousDistanceMomentsAtlas != null && previousDistanceMomentsAtlas.IsCreated() &&
             distanceMomentsAtlas != null && distanceMomentsAtlas.IsCreated() &&
             rayGBuffer != null && rayGBuffer.IsCreated &&
+            probeStateScheduler != null && probeStateScheduler.States != null &&
+            probeStateScheduler.States.IsValid() && probeStateScheduler.States.count == ProbeCount &&
             probePositionBuffer != null && probePositionBuffer.IsValid() &&
             probePositionBuffer.count == ProbeCount;
 
@@ -219,6 +237,9 @@ namespace Dou.DDGI
             minimumDistanceVariance = Mathf.Max(0.000001f, minimumDistanceVariance);
             indirectDiffuseIntensity = Mathf.Max(0.0f, indirectDiffuseIntensity);
             boundaryBlendDistance = Mathf.Max(0.001f, boundaryBlendDistance);
+            probeInfluenceRadiusScale = Mathf.Max(1.0f, probeInfluenceRadiusScale);
+            interiorBackfaceThreshold = Mathf.Clamp(interiorBackfaceThreshold, 0.9f, 1.0f);
+            dormantRecheckInterval = Mathf.Max(1, dormantRecheckInterval);
 
             RefreshProbeCache();
             UpdateExistingProbeTransforms();
@@ -253,6 +274,8 @@ namespace Dou.DDGI
                 return;
 
             probeBlender = null;
+            probeStateScheduler?.Dispose();
+            probeStateScheduler = null;
             probeBlendComputeShader = computeShader;
         }
 
@@ -267,6 +290,7 @@ namespace Dou.DDGI
             CommandBuffer commandBuffer = CommandBufferPool.Get("DDGI Volume Ray G-Buffer Capture");
             try
             {
+                probeStateScheduler?.RequestReset();
                 RecordRayGBufferCapture(commandBuffer);
                 Graphics.ExecuteCommandBuffer(commandBuffer);
             }
@@ -415,9 +439,19 @@ namespace Dou.DDGI
             }
             EnsureProbePositionBuffer();
             UpdateProbePositionBuffer();
+            if (probeBlendComputeShader != null &&
+                (probeStateScheduler == null || probeStateScheduler.States.count != ProbeCount))
+            {
+                probeStateScheduler?.Dispose();
+                probeStateScheduler = new DDGIProbeStateScheduler(probeBlendComputeShader, ProbeCount);
+                resourcesChanged = true;
+            }
 
             if (resourcesChanged || layoutChanged)
             {
+                hasLoggedCaptureDiagnostics = false;
+                hasRequestedTextureDiagnostics = false;
+                probeStateScheduler?.RequestReset();
                 LastCapturedProbeCount = 0;
                 LastEvaluatedLightCount = 0;
                 LastBlendedProbeCount = 0;
@@ -441,6 +475,10 @@ namespace Dou.DDGI
             rayGBuffer?.Release();
             radianceEvaluator?.Release();
             ReleaseProbePositionBuffer();
+            probeStateScheduler?.Dispose();
+            probeStateScheduler = null;
+            hasLoggedCaptureDiagnostics = false;
+            hasRequestedTextureDiagnostics = false;
             LastCapturedProbeCount = 0;
             LastEvaluatedLightCount = 0;
             LastBlendedProbeCount = 0;
@@ -456,12 +494,20 @@ namespace Dou.DDGI
         [ContextMenu("Reset Temporal History")]
         public void ResetTemporalHistory()
         {
+            probeStateScheduler?.RequestReset();
             hasValidRadianceHistory = false;
             hasPreparedProbeHistory = false;
             AccumulatedFrameCount = 0;
             lastRadianceUpdateFrame = -1;
             if (LastCapturedProbeCount == ProbeCount && HasValidResources)
                 pendingShadowedEvaluation = true;
+        }
+
+        [ContextMenu("Reclassify Probes")]
+        public void ReclassifyProbes()
+        {
+            probeStateScheduler?.RequestReset();
+            lastRadianceUpdateFrame = -1;
         }
 
         public void ClearAtlases(CommandBuffer commandBuffer)
@@ -485,6 +531,8 @@ namespace Dou.DDGI
             Vector2Int distanceResolution = DistanceAtlasResolution;
 
             commandBuffer.SetGlobalTexture(IrradianceAtlasId, irradianceAtlas);
+            if (probeStateScheduler != null)
+                commandBuffer.SetGlobalBuffer("_DDGI_ProbeStates", probeStateScheduler.States);
             commandBuffer.SetGlobalTexture(DistanceMomentsAtlasId, distanceMomentsAtlas);
             commandBuffer.SetGlobalVector(
                 ProbeCountsId,
@@ -578,7 +626,21 @@ namespace Dou.DDGI
             rayTracingScene.Rebuild(geometryLayers, commandBuffer);
 
             capturedRayRotation = GetCaptureRayRotation();
-            rayGBuffer.Clear(commandBuffer);
+            if (probeStateScheduler == null)
+                throw new InvalidOperationException("Assign the ProbeBlend shader before volume capture.");
+            float radius = 0.0f;
+            // Maximize over all cell diagonals, including parent-induced shear.
+            for (int corner = 0; corner < 8; ++corner)
+            {
+                Vector3 diagonal = new Vector3(
+                    (corner & 1) == 0 ? probeSpacing.x : -probeSpacing.x,
+                    (corner & 2) == 0 ? probeSpacing.y : -probeSpacing.y,
+                    (corner & 4) == 0 ? probeSpacing.z : -probeSpacing.z);
+                radius = Mathf.Max(radius, transform.TransformVector(diagonal).magnitude);
+            }
+            probeStateScheduler.RecordPrepare(commandBuffer, probePositionBuffer, rayGBuffer,
+                geometryLayers, radius * Mathf.Max(1.0f, probeInfluenceRadiusScale), maximumRayDistance,
+                enableProbeClassification, interiorBackfaceThreshold, dormantRecheckInterval);
             rayTracingDispatcher.RecordTrace(
                 commandBuffer,
                 rayTracingScene.AccelerationStructure,
@@ -586,7 +648,9 @@ namespace Dou.DDGI
                 rayGBuffer,
                 minimumRayDistance,
                 maximumRayDistance,
-                capturedRayRotation);
+                capturedRayRotation,
+                probeStateScheduler.States);
+            probeStateScheduler.RecordClassify(commandBuffer, probePositionBuffer, rayGBuffer);
         }
 
         Matrix4x4 GetCaptureRayRotation()
@@ -642,7 +706,8 @@ namespace Dou.DDGI
                 hasPreviousVolume,
                 indirectBounceIntensity,
                 mainLight,
-                mainLightCascadeCount);
+                mainLightCascadeCount,
+                probeStateScheduler.States);
             LastEvaluatedLightCount = radianceEvaluator.LightCount;
         }
 
@@ -652,7 +717,7 @@ namespace Dou.DDGI
                 throw new InvalidOperationException("Assign the DDGI ProbeBlend compute shader before blending.");
 
             probeBlender ??= new DDGIProbeBlender(probeBlendComputeShader);
-            ClearAtlases(commandBuffer);
+            if (LastBlendedProbeCount != ProbeCount) ClearAtlases(commandBuffer);
             probeBlender.RecordBlend(
                 commandBuffer,
                 rayGBuffer,
@@ -669,7 +734,26 @@ namespace Dou.DDGI
                 enableTemporalAccumulation && hasPreparedProbeHistory,
                 irradianceHysteresis,
                 distanceHysteresis,
-                temporalGamma);
+                temporalGamma,
+                probeStateScheduler.States);
+            RecordTextureDiagnostics(commandBuffer);
+            probeStateScheduler.RecordStatistics(commandBuffer, data =>
+            {
+                if (this == null) return;
+                foreach (DDGIProbe probe in probes)
+                    if (probe != null && (uint)probe.LinearIndex < data.Length)
+                        probe.SetRuntimeState((DDGIProbeState)data[probe.LinearIndex].x);
+                if (!hasLoggedCaptureDiagnostics)
+                {
+                    hasLoggedCaptureDiagnostics = true;
+                    Debug.Log($"DDGI initialization [{(Application.isPlaying ? "Play" : "Editor")}] {name}: " +
+                        $"geometry={LastCapturedGeometryCount}, staticBatchRenderers={rayTracingScene?.StaticBatchedRendererCount ?? 0}, " +
+                        $"updated={LastUpdatedProbeCount}/{ProbeCount}, " +
+                        $"Off={GetProbeStateCount(DDGIProbeState.Off)}, Sleep={GetProbeStateCount(DDGIProbeState.Sleep)}, " +
+                        $"Vigilant={GetProbeStateCount(DDGIProbeState.Vigilant) + GetProbeStateCount(DDGIProbeState.NewVigilant)}, " +
+                        $"Awake={GetProbeStateCount(DDGIProbeState.Awake) + GetProbeStateCount(DDGIProbeState.NewAwake)}", this);
+                }
+            });
             AccumulatedFrameCount = enableTemporalAccumulation && hasPreparedProbeHistory
                 ? AccumulatedFrameCount + 1
                 : 1;
@@ -680,6 +764,32 @@ namespace Dou.DDGI
             lastBlendedProbeSpacing = probeSpacing;
             lastBlendedGeometryLayers = geometryLayers.value;
             lastBlendedMaximumRayDistance = maximumRayDistance;
+        }
+
+        void RecordTextureDiagnostics(CommandBuffer commandBuffer)
+        {
+            if (hasRequestedTextureDiagnostics || !SystemInfo.supportsAsyncGPUReadback) return;
+            hasRequestedTextureDiagnostics = true;
+            string mode = Application.isPlaying ? "Play" : "Editor";
+            RenderTexture capturedPositions = rayGBuffer.PositionTexture;
+            RenderTexture capturedIrradiance = irradianceAtlas;
+            commandBuffer.RequestAsyncReadback(capturedPositions, 0, request =>
+            {
+                if (this == null || rayGBuffer?.PositionTexture != capturedPositions || request.hasError) return;
+                var data = request.GetData<Vector4>();
+                int hits = 0;
+                foreach (Vector4 value in data) if (value.w > 0.0f) hits++;
+                Debug.Log($"DDGI capture [{mode}] {name}: hits={hits}/{data.Length}.", this);
+            });
+            commandBuffer.RequestAsyncReadback(capturedIrradiance, 0, TextureFormat.RGBAFloat, request =>
+            {
+                if (this == null || irradianceAtlas != capturedIrradiance || request.hasError) return;
+                var data = request.GetData<Vector4>();
+                float maximum = 0.0f;
+                foreach (Vector4 value in data)
+                    maximum = Mathf.Max(maximum, Mathf.Max(value.x, Mathf.Max(value.y, value.z)));
+                Debug.Log($"DDGI atlas [{mode}] {name}: maxIrradiance={maximum:G6}.", this);
+            });
         }
 
         public Vector3Int GetGridCoordinate(int probeIndex)
