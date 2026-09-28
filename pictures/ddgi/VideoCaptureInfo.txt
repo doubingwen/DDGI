@@ -1,0 +1,9 @@
+Scene: Assets/Scenes/SampleScene.unity
+Source: Main Camera; fixed pose; 1280 x 720 per view
+Frames: 360; playback: 30 fps; duration: 12 seconds
+Main light: Directional Light
+Light rotation: world-Y offset = 45 * sin(2 * PI * frame / 360) degrees
+Warmup: 120 DDGI updates from reset history
+One DDGI update per recorded frame, followed by IndirectOnly rendering from the same atlas
+Offline frame capture, not a real-time performance measurement
+Original light rotation, debug modes and automatic-update settings restored

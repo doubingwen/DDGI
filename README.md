@@ -27,6 +27,18 @@ Sponza 场景，同一机位、光源与同一份已累积的 Volume 数据，�
 
 图片直接从当前项目导出。机位、纹理尺寸和捕获记录见 [CaptureInfo.txt](pictures/ddgi/CaptureInfo.txt)，不作为性能基准或物理正确性验证。
 
+### 动态光照演示
+
+固定相机，主方向光以原方向为中心绕世界 Y 轴往返旋转 **±45°**。左侧为最终场景，右侧为同一帧 Probe Atlas 重建的间接漫反射，可同时观察直接光阴影移动与 DDGI 的动态响应。
+
+![主方向光旋转：最终场景与仅间接光对照](pictures/ddgi/DDGI_LightRotation.gif)
+
+[高清对照视频（MP4，1920 × 580）](pictures/ddgi/DDGI_LightRotation.mp4) · [纯场景视频（MP4，1280 × 720）](pictures/ddgi/DDGI_LightRotation_Scene.mp4)
+
+演示为 12 秒、360 帧，MP4 播放帧率为 30 fps；内嵌动图为 10 fps。录制前进行了 120 次 DDGI 更新预热，随后每个输出帧重新捕获、计算主光阴影与 Radiance，并更新 Probe Atlas；对照两侧共用该次更新结果，没有通过后期调亮画面模拟光照变化。时间累积可能使间接光响应滞后。
+
+该视频采用离线逐帧导出，**30 fps 是播放帧率，不代表项目实测运行帧率**。录制后恢复原光源旋转、调试模式与自动更新设置；详细记录见 [VideoCaptureInfo.txt](pictures/ddgi/VideoCaptureInfo.txt)。
+
 ## 核心实现
 
 | 模块 | 实现内容 |
@@ -226,6 +238,12 @@ Radiance 预览使用 `c / (1 + c)` 色调映射并转为 sRGB。可见性图中
 | Reset Temporal History | 清除历史有效性并重新累积 |
 
 **重新导出图片：** 运行 Unity 菜单 `Dou DDGI > Export README Screenshots`。工具优先使用 Main Camera，冻结 Volume 更新进行同机位对比，结束后恢复强度、调试模式和更新开关，不保存临时参数。建议先等待时间累积稳定。
+
+**重新录制视频：** 退出 Play，运行 `Dou DDGI > Record README Light Rotation`，录制期间不要修改场景。可用 `Cancel README Video Recording` 中止并恢复原参数。完成后在项目根目录执行下列命令，需要 FFmpeg 在 PATH 中；原始帧保存在不提交到仓库的 `Library/DDGI.VideoFrames`。
+
+```powershell
+pwsh -File Tools/Encode-DDGIDemo.ps1
+```
 
 **参考检查：** 在项目根目录使用 PowerShell 执行：
 
