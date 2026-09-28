@@ -40,6 +40,7 @@ void CaptureSurfaceSamples(uint3 dispatchId : SV_DispatchThreadID)
     float skyVisibility = saturate(1.0 - normalAndMask.w);
 
     ProbeSurfaceSample sample;
+    //computer和shader中不要出现if else 可以用lerp取代
     sample.position = lerp(worldPosition, _RF_ProbePosition.xyz + direction, skyVisibility);
     sample.normal = normalAndMask.xyz;
     sample.albedo = _RF_AlbedoCube.SampleLevel(sampler_point_clamp, direction, 0).rgb;

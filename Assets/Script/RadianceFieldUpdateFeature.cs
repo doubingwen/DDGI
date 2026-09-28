@@ -30,9 +30,10 @@ namespace Dou.GI
 
                         volume.BeginLightingFrame(commandBuffer);
                         foreach (RadianceProbe probe in volume.Probes)
+                            //computer shader计算
                             probe.RecordRadianceUpdate(commandBuffer, volume);
                     }
-
+                    //将computer shader计算的局部结果传给全局的shader用
                     RadianceFieldRegistry.PrimaryVolume?.BindGlobalShaderState(commandBuffer);
                 }
 

@@ -1,0 +1,3 @@
+Rays: 144
+Hits: 139
+Misses: 5

@@ -90,7 +90,7 @@ namespace Dou.GI
             RadianceFieldRegistry.Unregister(this);
             ReleaseCoefficientBuffers();
         }
-
+        //根据是否创建判断，走创建还是走重置数据或加载数据
         public void EnsureInitialized()
         {
             if (!HasCompleteGrid())

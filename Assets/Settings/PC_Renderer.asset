@@ -46,6 +46,19 @@ MonoBehaviour:
   m_EditorClassIdentifier: 
   m_Active: 1
   radianceCompositeMaterial: {fileID: 2100000, guid: 12502358bd17be04eaa99b29025a6ecf, type: 2}
+--- !u!114 &-844484983840173441
+MonoBehaviour:
+  m_ObjectHideFlags: 0
+  m_CorrespondingSourceObject: {fileID: 0}
+  m_PrefabInstance: {fileID: 0}
+  m_PrefabAsset: {fileID: 0}
+  m_GameObject: {fileID: 0}
+  m_Enabled: 1
+  m_EditorHideFlags: 0
+  m_Script: {fileID: 11500000, guid: e3f7beac4f9baba4abb20b26c411bc43, type: 3}
+  m_Name: DDGI Composite
+  m_EditorClassIdentifier: 
+  m_Active: 1
 --- !u!114 &11400000
 MonoBehaviour:
   m_ObjectHideFlags: 0
@@ -75,7 +88,8 @@ MonoBehaviour:
   - {fileID: 4525097011129359492}
   - {fileID: -1716789020343745349}
   - {fileID: -5615373391228883323}
-  m_RendererFeatureMap: ad6b866f10d7b46c841c8cb2c15fcc3ebbc41e607bbd2ce8852e9ff6a62f12b2
+  - {fileID: -844484983840173441}
+  m_RendererFeatureMap: ad6b866f10d7b46c841c8cb2c15fcc3ebbc41e607bbd2ce8852e9ff6a62f12b27f120ea861c947f4
   m_UseNativeRenderPass: 1
   xrSystemData: {fileID: 0}
   postProcessData: {fileID: 11400000, guid: 41439944d30ece34e96484bdb6645b55, type: 2}

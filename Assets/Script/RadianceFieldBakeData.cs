@@ -4,7 +4,7 @@ using UnityEngine.Scripting.APIUpdating;
 using UnityEngine.Serialization;
 
 namespace Dou.GI
-{
+{   //将数据打包成一个float数组
     [CreateAssetMenu(fileName = "RadianceFieldBakeData", menuName = "Dou GI/Radiance Field Bake Data")]
     [MovedFrom(true, null, null, "ProbeVolumeData")]
     public sealed class RadianceFieldBakeData : ScriptableObject

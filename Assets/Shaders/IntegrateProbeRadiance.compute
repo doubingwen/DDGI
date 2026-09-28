@@ -15,9 +15,11 @@ struct ProbeSurfaceSample
     float3 albedo;
     float skyVisibility;
 };
-
+//points information
 RWStructuredBuffer<ProbeSurfaceSample> _RF_SurfaceSamples;
+//Radiacne
 RWStructuredBuffer<float3> _RF_SurfaceRadiance;
+//sH
 RWStructuredBuffer<int> _RF_ProbeCoefficients;
 RWStructuredBuffer<int> _RF_FieldCoefficients;
 StructuredBuffer<int> _RF_HistoryCoefficients;
@@ -59,8 +61,9 @@ void IntegrateProbeRadiance(uint3 dispatchId : SV_DispatchThreadID)
         sampler_GlossyEnvironmentCubeMap,
         direction,
         0).rgb;
+    //environment light
     radiance += environment * sample.skyVisibility * _RF_EnvironmentIntensity;
-
+    //这个position 采样上一帧的SH 叠加光照
     if (_RF_ProbeGridIndex >= 0)
     {
         float3 history = SampleRadianceField(
@@ -77,6 +80,7 @@ void IntegrateProbeRadiance(uint3 dispatchId : SV_DispatchThreadID)
     [unroll]
     for (int coefficientIndex = 0; coefficientIndex < DOU_GI_SH_COEFFICIENT_COUNT; coefficientIndex++)
     {
+        //投影，向基上投影，一共有9个基（2阶）
         float3 projected = EvaluateShBasis(coefficientIndex, direction) * radiance * sampleNormalization;
         int coefficientOffset = coefficientIndex * 3;
         InterlockedAdd(_RF_ProbeCoefficients[coefficientOffset], EncodeRadiance(projected.x));

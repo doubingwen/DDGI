@@ -80,6 +80,8 @@ namespace Dou.GI
         int captureKernel = -1;
         int integrateKernel = -1;
 
+        //让上面变量成为只读数据
+        //=> 等同于访问SurfaceSamples  return surfaceSampleCache  防止其他改变
         public int GridIndex => gridIndex;
         public IReadOnlyList<ProbeSurfaceSample> SurfaceSamples => surfaceSampleCache;
         internal ComputeBuffer SurfaceSampleBuffer => surfaceSampleBuffer;

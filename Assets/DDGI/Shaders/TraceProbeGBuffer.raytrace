@@ -1,0 +1,86 @@
+#pragma max_recursion_depth 1  //递归深度，只发射一次
+
+#include "Assets/DDGI/Shaders/DDGIRayPayload.hlsl"
+
+#define DDGI_GOLDEN_ANGLE 2.39996322972865332223
+
+RaytracingAccelerationStructure _DDGI_AccelerationStructure;
+StructuredBuffer<float3> _DDGI_ProbePositions;
+
+RWTexture2D<float4> _DDGI_RayPositionTexture;
+RWTexture2D<float4> _DDGI_RayNormalTexture;
+RWTexture2D<float4> _DDGI_RayAlbedoTexture;
+RWTexture2D<float2> _DDGI_RayDistanceMomentsTexture;
+
+uint _DDGI_RayCount;
+float _DDGI_MinRayDistance;
+float _DDGI_MaxRayDistance;
+float4x4 _DDGI_RayRotation;
+
+float3 FibonacciSphereDirection(uint rayIndex, uint rayCount)
+{
+    float sample = (rayIndex + 0.5) / rayCount;
+    float cosTheta = 1.0 - 2.0 * sample;
+    float sinTheta = sqrt(saturate(1.0 - cosTheta * cosTheta));
+    float azimuth = DDGI_GOLDEN_ANGLE * rayIndex;
+
+    return float3(
+        cos(azimuth) * sinTheta,
+        sin(azimuth) * sinTheta,
+        cosTheta);
+}
+
+[shader("miss")]
+void DDGIMiss(inout DDGIRayPayload payload : SV_RayPayload)
+{
+    payload.hit = 0;
+}
+
+[shader("raygeneration")]
+void DDGIRayGeneration()
+{
+    uint2 outputCoordinate = DispatchRaysIndex().xy;
+    uint rayIndex = outputCoordinate.x;
+    uint probeIndex = outputCoordinate.y;
+
+    float3 localDirection = FibonacciSphereDirection(rayIndex, _DDGI_RayCount);
+    float3 rayDirection = normalize(mul((float3x3)_DDGI_RayRotation, localDirection));
+
+    RayDesc ray;
+    ray.Origin = _DDGI_ProbePositions[probeIndex];
+    ray.Direction = rayDirection;
+    ray.TMin = _DDGI_MinRayDistance;
+    ray.TMax = _DDGI_MaxRayDistance;
+
+    DDGIRayPayload payload;
+    payload.positionWS = 0.0;
+    payload.hitDistance = _DDGI_MaxRayDistance;
+    payload.normalWS = 0.0;
+    payload.hit = 0;
+    payload.albedo = 0.0;
+
+    TraceRay(
+        _DDGI_AccelerationStructure,
+        RAY_FLAG_NONE,
+        0xff,
+        0,
+        1,
+        0,
+        ray,
+        payload);
+
+    _DDGI_RayPositionTexture[outputCoordinate] = payload.hit != 0
+        ? float4(payload.positionWS, 1.0)
+        : 0.0;
+    _DDGI_RayNormalTexture[outputCoordinate] = payload.hit != 0
+        ? float4(payload.normalWS, 1.0)
+        : 0.0;
+    _DDGI_RayAlbedoTexture[outputCoordinate] = payload.hit != 0
+        ? float4(payload.albedo, 1.0)
+        : 0.0;
+
+    float rayDistance = payload.hit != 0 ? payload.hitDistance : _DDGI_MaxRayDistance;
+    _DDGI_RayDistanceMomentsTexture[outputCoordinate] = float2(
+        rayDistance,
+        rayDistance * rayDistance);
+}
