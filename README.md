@@ -36,6 +36,15 @@ Probe Volume / 场景加速结构
 
 项目使用 **Unity 6000.0.67f1 / URP 17.0.4**。光线追踪捕获需要 Windows、Direct3D 12，以及支持 Unity Ray Tracing Shader 的显卡和驱动。
 
+大型旧 GI 烘焙资产通过 Git LFS 管理。安装 Git LFS 后克隆项目：
+
+```bash
+git lfs install
+git clone https://github.com/doubingwen/DDGI.git
+cd DDGI
+git lfs pull
+```
+
 1. 用 Unity Hub 打开项目，加载 `Assets/Scenes/SampleScene.unity`。
 2. 确认 Windows 图形 API 使用 Direct3D 12；修改图形 API 后需要重启 Unity。
 3. 使用 URP **Deferred Renderer**，开启 **Compatibility Mode（关闭 Render Graph）**，并启用 `DDGI Composite` Renderer Feature。
